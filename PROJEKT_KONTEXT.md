@@ -2,34 +2,36 @@
 
 ## Co je to za projekt
 
-Webová aplikace / SaaS produkt pro predikci fotbalových utkání Top 5 evropských lig
-s automatickou detekcí value betů. Cíl je veřejný produkt s potenciálem monetizace
-(premium tier, API přístup). Projekt je ve fázi funkční kostry — backendová logika
-napsaná, frontend a deployment teprve přijdou.
+Webová aplikace pro predikci fotbalových utkání Top 5 evropských lig s automatickou detekcí
+value betů, Kelly criteriem a backtestingem. Backend + Streamlit dashboard s přímým napojením
+na Supabase. Cíl: veřejný produkt s potenciálem monetizace (premium tier, API přístup).
 
 ---
 
 ## Technický stack
 
 - **Jazyk:** Python 3.11+
-- **Data:** API-Football (přes RapidAPI) — placený plán
-- **Cache:** SQLite (lokální, TTL-based)
-- **Model:** Dixon-Coles Poisson model (1997)
-- **Architektura:** OOP, modulární, připravená na rozšíření
+- **Data:** API-Football (v3.football.api-sports.io)
+- **Cache:** SQLite (lokální, TTL-based, `cache/football.db`)
+- **Modely:** Dixon-Coles Poisson + XGBoost + Ensemble + izotonicka kalibrace
+- **DB:** Supabase (PostgreSQL) přes SQLAlchemy + psycopg2
+- **API:** FastAPI + APScheduler (scheduler 09:00 predikce / 23:00 resolve)
+- **Frontend:** Streamlit dashboard (`dashboard.py`)
+- **Deployment:** GitHub + Streamlit Community Cloud (dashboard); FastAPI běží lokálně
 
 ---
 
 ## Ligy (Top 5 evropských)
 
-| Liga | ID | Země |
+| Liga | ID | Sezóny (training) |
 |---|---|---|
-| Premier League | 39 | England |
-| La Liga | 140 | Spain |
-| Bundesliga | 78 | Germany |
-| Serie A | 135 | Italy |
-| Ligue 1 | 61 | France |
+| Premier League | 39 | 2022, 2023, 2024, 2025 |
+| La Liga | 140 | 2022, 2023, 2024, 2025 |
+| Bundesliga | 78 | 2022, 2023, 2024, 2025 |
+| Serie A | 135 | 2022, 2023, 2024, 2025 |
+| Ligue 1 | 61 | 2022, 2023, 2024, 2025 |
 
-Sezóna: **2024**
+Aktivní sezóna: **2025**
 
 ---
 
@@ -37,173 +39,158 @@ Sezóna: **2024**
 
 ```
 football_predictor/
-├── config/
-│   └── settings.py        # Ligy, TTL, rate limits, API config
+├── config/settings.py          # LeagueConfig, BookmakerConfig, CacheTTL, settings singleton
 ├── api/
-│   ├── client.py          # HTTP client + RateLimiter + cache integrace
-│   └── cache.py           # SQLite CacheManager (TTL-based, persistent)
+│   ├── client.py               # APIClient + RateLimiter (300 req/min) + SQLite cache
+│   ├── cache.py                # CacheManager (TTL-based, TTL=-1 = nikdy neexpiruje)
+│   └── app.py                  # FastAPI aplikace — všechny endpointy
 ├── data/
-│   ├── models.py          # Dataclasses: Team, Fixture, MatchResult, Odds, Prediction
-│   └── fetcher.py         # FootballFetcher — orchestrace API volání
+│   ├── models.py               # Dataclasses: Team, Fixture, MatchResult, Odds, Prediction
+│   └── fetcher.py              # FootballFetcher — multi-season fetch, multi-bookmaker odds
 ├── features/
-│   └── engineer.py        # FeatureEngineer: form, H2H, Elo rating
+│   └── engineer.py             # FeatureEngineer: O(n) precompute, 15+ features, bez data leakage
 ├── models/
-│   ├── base.py            # BasePredictor (ABC)
-│   └── poisson.py         # DixonColesPredictor
-├── betting/
-│   └── value.py           # ValueBetDetector (edge vs. implied odds)
-├── cache/                 # SQLite databáze (gitignore)
-├── main.py                # Hlavní runner
-├── requirements.txt
-├── .env.example
-└── README.md
+│   ├── base.py                 # BasePredictor (ABC)
+│   ├── poisson.py              # DixonColesPredictor — vektorizovaný (NumPy), rychlý
+│   ├── xgboost_model.py        # XGBoostPredictor
+│   ├── ensemble.py             # EnsemblePredictor (průměr pravděpodobností)
+│   ├── calibrator.py           # ProbabilityCalibrator (isotonic regression)
+│   └── saved/                  # Uložené modely joblib (gitignore)
+├── betting/value.py            # ValueBetDetector (min_edge=3%)
+├── backtesting/engine.py       # BacktestEngine — walk-forward, CalibrationResult
+├── db/
+│   ├── models.py               # ORM: PredictionRow, BacktestRunRow, BankrollRow
+│   └── session.py              # SQLAlchemy engine + SessionLocal
+├── dashboard.py                # Streamlit dashboard (7 tabů, čte přímo z Supabase)
+├── main.py                     # CLI runner
+├── run_backtest.py             # Backtest runner
+├── .env                        # API_FOOTBALL_KEY + DATABASE_URL (gitignore)
+├── .env.example                # Template
+└── requirements.txt
 ```
 
 ---
 
-## Klíčové třídy a jejich role
+## Co je hotovo
 
-### `Settings` (config/settings.py)
-- Centrální konfigurace celého projektu
-- Obsahuje `LeagueConfig` pro každou ligu a `CacheTTL` s různými TTL pro různé typy dat
-- Načítá API klíč z `.env`
-
-### `CacheManager` (api/cache.py)
-- SQLite-based cache s TTL expirací
-- TTL = -1 znamená "nikdy neexpiruje" (historická data)
-- Metody: `get`, `set`, `delete`, `purge_expired`
-
-### `APIClient` (api/client.py)
-- Wrapper nad `requests.Session`
-- Integrovaný `RateLimiter` (token bucket, 300 req/min)
-- Automaticky cachuje každý response
-- `force_refresh=True` přeskočí cache
-
-### `FootballFetcher` (data/fetcher.py)
-- `get_fixtures(league, status="FT")` — historické výsledky
-- `get_upcoming_fixtures(league, next_n=10)` — nadcházející zápasy
-- `get_odds(fixture_id)` — odds od Bet365 (bookmaker ID 11)
-
-### `FeatureEngineer` (features/engineer.py)
-- `build_features(fixture, history)` → Dict[str, float]
-- Form features: průměrné body, góly dané/obdržené (posledních N zápasů)
-- H2H features: win rate z posledních 10 vzájemných zápasů
-- Elo rating: dynamicky builovaný z celé historie (K=32)
-
-### `DixonColesPredictor` (models/poisson.py)
-- Trénování: MLE optimalizace attack/defence parametrů pro každý tým
-- Predikce: pravděpodobnostní matice výsledků skóre
-- DC korekce: opravuje podhodnocení výsledků 0-0, 1-0, 0-1, 1-1 (rho=-0.13)
-- Output: `Prediction` s prob_home, prob_draw, prob_away, xG
-
-### `ValueBetDetector` (betting/value.py)
-- Porovnává model probability vs. implied probability z odds
-- `min_edge = 0.03` (3 % nad bookmaker implied prob)
-- Počítá Expected Value pro každý value bet
+- [x] Data pipeline: fetch → SQLite cache → parse → dataclasses
+- [x] Modely: Dixon-Coles (vektorizovaný MLE), XGBoost, Ensemble
+- [x] Izotonicka kalibrace pravděpodobností
+- [x] Feature engineering: form, venue form, H2H, Elo (snapshot, bez leakage), attack/defense strength, streak, rest days, trend, consistency, season PPG — O(n) via `precompute()`
+- [x] Value bet detekce (edge nad implied probability, multi-bookmaker)
+- [x] Kelly criterion (fractional 25%), bankroll tracking
+- [x] Backtesting: walk-forward simulace, accuracy, Brier, log loss, ECE kalibrace
+- [x] FastAPI: plná sada endpointů (viz níže)
+- [x] Model persistence: joblib save/load
+- [x] Supabase DB: predictions, backtest_runs, bankroll tabulky
+- [x] Streamlit dashboard: 7 tabů, přímé čtení z Supabase, akce přes lokální API
+- [x] Scheduler: APScheduler (09:00 predikce, 23:00 resolve)
+- [x] Manuální retrain s live progress logem v dashboardu
+- [x] GitHub repo: https://github.com/Daifyyy/sportpredictor
 
 ---
 
-## Cache TTL konfigurace
+## FastAPI endpointy (`api/app.py`)
 
-| Typ dat | TTL |
-|---|---|
-| Odds | 15 minut |
-| Fixtures (upcoming) | 1 hodina |
-| Standings | 1 hodina |
-| Team stats | 24 hodin |
-| Static data | 7 dní |
-| Historické výsledky (FT) | nikdy neexpiruje |
-
----
-
-## Co funguje (aktuální stav)
-
-- [x] Kompletní data pipeline (fetch → cache → parse → dataclasses)
-- [x] Rate limiter pro API volání
-- [x] Dixon-Coles model s trénováním a predikcí
-- [x] Value bet detekce s edge a EV výpočtem
-- [x] Feature engineering (form, H2H, Elo)
-- [x] `main.py` runner přes všech 5 lig
+| Method | Endpoint | Popis |
+|---|---|---|
+| GET | `/predictions/{league}` | Fetch + ulož predikce pro nadcházející zápasy |
+| GET | `/value-bets` | Value bety napříč všemi ligami |
+| GET | `/track-record/{league}` | Spustí backtest, uloží výsledky |
+| GET | `/track-record/{league}/history` | Historie backtest runů z DB |
+| POST | `/retrain` | Spustí přetrénování na pozadí (202 Accepted) |
+| GET | `/retrain/status` | Stav retrainingu + live log kroků |
+| POST | `/resolve/{league}` | Doplní actual_outcome pro dokončené zápasy |
+| GET | `/performance/{league}` | Reálná accuracy/VB statistiky |
+| POST | `/calibrate/{league}` | Fit isotonic kalibrátoru |
+| GET | `/calibration/{league}` | ECE kalibrace (backtest, 1-2 min) |
+| GET | `/kelly/{league}` | Kelly stake suggestions |
+| POST | `/bankroll/update/{league}` | Simulace bankrollu z vyřešených VB |
+| GET | `/bankroll/{league}` | Aktuální bankroll stav |
+| GET | `/config/leagues` | Seznam lig ze settings |
+| GET | `/config/bookmakers` | Seznam bookmakerů ze settings |
 
 ---
 
-## Co chybí / další vývoj (prioritizovaný)
+## Streamlit dashboard (`dashboard.py`)
 
-### Fáze 1 — Backend dokončení
-- [ ] **Backtesting modul** — simulace predikcí na historických datech, ROI, Brier score, calibration
-- [ ] **XGBoost model** — alternativa k Dixon-Colesovi, stejný `BasePredictor` interface
-- [ ] **Model ensemble** — kombinace Dixon-Coles + XGBoost
-- [ ] **Persistence modelu** — uložení natrénovaných parametrů (pickle / joblib)
+7 tabů:
+1. **Predikce** — rozdělení na "právě hraje" (🔴) a "nadcházející" (📅), + value bety
+2. **Výkonnost** — accuracy, VB hit rate per model (VB správně = vb_outcome == actual)
+3. **Value Bety** — nadcházející value bety s kurzy
+4. **Kelly** — stake suggestions (fractional Kelly 25%, bankroll 1000)
+5. **Bankroll** — graf vývoje, P&L, hit rate
+6. **Backtest** — history runů, accuracy v čase
+7. **Kalibrace** — reliability diagram (lazy, načte se tlačítkem)
 
-### Fáze 2 — API vrstva
-- [ ] **FastAPI backend** — endpointy `/predictions/{league}`, `/value-bets`, `/track-record`
-- [ ] **Scheduled jobs** — automatický re-training, fetch nových dat (APScheduler / cron)
-- [ ] **Databáze** — PostgreSQL pro uložení predikcí a track record (SQLAlchemy)
+Sidebar akce (vyžadují lokální API):
+- 🧠 Přetrénovat, 🔄 Načíst predikce, ✅ Resolve, 🎯 Kalibrovat, 💹 Update bankroll
 
-### Fáze 3 — Frontend
-- [ ] **Dashboard** — Next.js nebo Streamlit (pro rychlý prototype)
-- [ ] **Track record** — historická přesnost modelu, ROI graf
-- [ ] **Value bet feed** — real-time aktualizace před zápasy
-
-### Fáze 4 — Monetizace a deployment
-- [ ] **Uživatelské účty** — free vs. premium tier
-- [ ] **Deployment** — Railway/Render (backend) + Vercel (frontend)
-- [ ] **Platební brána** — Stripe
+Auto-chování:
+- Přepnutí ligy → `cache_data.clear()` → načtení z Supabase
+- Retrain log polluje každé 2s (jen když běží)
+- `api_alive()` check každých 10s — tlačítka disabled když API offline
 
 ---
 
-## Závislosti (requirements.txt)
+## DB schéma (Supabase)
 
-```
-requests>=2.31
-numpy>=1.26
-scipy>=1.11
-python-dotenv>=1.0
+**`predictions`** — unique: `(fixture_id, model_name)`
+- probabilities, xG, value_bets (ARRAY), predicted_outcome, actual_outcome, correct, odds_*
+
+**`backtest_runs`** — každý run = nový řádek (plná historie)
+
+**`bankroll`** — Kelly simulace: bet_on, odds, stake_pct, outcome, pnl_pct, bankroll_after
+
+---
+
+## Lokální spuštění
+
+```bash
+# API backend
+uvicorn api.app:app --reload
+
+# Streamlit dashboard
+streamlit run dashboard.py
 ```
 
-Budoucí přidání: `fastapi`, `uvicorn`, `sqlalchemy`, `xgboost`, `scikit-learn`, `apscheduler`
+---
+
+## Kde příště začít
+
+Projekt je funkční a pushnutý na GitHub. Streamlit Community Cloud deployment zatím
+**nebyl nastaven** — to je logický další krok.
+
+### Deployment na Streamlit Community Cloud:
+1. Jdi na share.streamlit.io
+2. Připoj repo: `Daifyyy/sportpredictor`, branch `main`, soubor `dashboard.py`
+3. Přidej secret: `DATABASE_URL = postgresql://...` (Transaction pooler, port 6543)
+4. Deploy
+
+### Možné další kroky:
+- Deployment dashboardu na Streamlit Community Cloud
+- Více bookmakerů pro value bet porovnání (Pinnacle již v settings)
+- Notifikace (email/Telegram) při value betu
+- Monetizace / uživatelské účty (Stripe, premium tier)
+
+---
+
+## Supabase
+
+- Free tier — 500 MB limit, projekt se pauze po 1 týdnu nečinnosti
+- Data objem je zanedbatelný (~150 řádků/týden), cleanup není potřeba
+- Připojení: Transaction pooler URL, port **6543** (ne 5432!)
+- Při chybě "server closed connection": sessions nejsou cachované — `SASession(engine)` jako context manager per query
 
 ---
 
 ## Prostředí
 
-- **OS:** Windows (PowerShell)
-- **Claude Code:** v2.1.68, nainstalováno v `C:\Users\denis\.local\bin\claude.exe`
+- **OS:** Windows 11, shell: bash
 - **Projekt:** `C:\Projekt\football_predictor\`
-- **API:** API-Football přes RapidAPI (placený plán)
+- **GitHub:** https://github.com/Daifyyy/sportpredictor
+- **Streamlit:** spustit přes `streamlit run dashboard.py`
 
 ---
 
-## Designová rozhodnutí a principy
-
-1. **OOP throughout** — každá vrstva je třída, žádný spaghetti kód
-2. **Cache-first** — každé API volání jde přes cache, historická data se nikdy znovu nefetchují
-3. **BasePredictor ABC** — nové modely lze přidat bez změny okolního kódu
-4. **FeatureEngineer je rozšiřitelný** — nová feature = nová metoda, pipeline se složí automaticky
-5. **ValueBet over výsledková predikce** — produkt stojí na edge detekci, ne na "kdo vyhraje"
-6. **Transparentní track record** — důvěryhodnost produktu stojí na veřejné historii přesnosti
-
----
-
-## Jak spustit projekt
-
-```bash
-# Instalace závislostí
-pip install -r requirements.txt
-
-# Nastavení API klíče
-cp .env.example .env
-# Edituj .env a doplň: API_FOOTBALL_KEY=tvuj_klic
-
-# Spuštění
-python main.py
-
-# Claude Code
-cd C:\Projekt\football_predictor
-claude
-```
-
----
-
-*Tento soubor slouží jako kontext pro nové Claude konverzace / Claude Code sessions.*
-*Při startu nové session: "Přečti PROJEKT_KONTEXT.md a navážeme na vývoj."*
+*Při startu nové session: "Přečti PROJEKT_KONTEXT.md" — tento soubor obsahuje aktuální stav.*
