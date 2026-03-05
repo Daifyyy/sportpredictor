@@ -193,41 +193,54 @@ with tab_pred:
 
     rows = load_predictions(league)
     now = datetime.utcnow()
-    upcoming = [r for r in rows if r.actual_outcome is None and r.match_date > now]
+    # Show all unresolved: upcoming + in-progress (match_date in the past but no result yet)
+    upcoming = [r for r in rows if r.actual_outcome is None]
+    live = [r for r in upcoming if r.match_date <= now]
+    future = [r for r in upcoming if r.match_date > now]
 
     if not upcoming:
         st.info("Žádné nadcházející predikce. Klikni 'Načíst predikce'.")
     else:
-        # Group by fixture_id → one row per match, columns per model
-        by_fixture: dict[int, list] = {}
+        def render_fixture_table(subset):
+            by_fixture: dict[int, list] = {}
+            for r in subset:
+                by_fixture.setdefault(r.fixture_id, []).append(r)
+            pivot_rows = []
+            for fixture_id, preds in sorted(by_fixture.items(), key=lambda x: x[1][0].match_date):
+                p0 = preds[0]
+                row = {"Datum": p0.match_date.strftime("%d.%m %H:%M"), "Domácí": p0.home_team, "Hosté": p0.away_team}
+                vb_all = []
+                for p in preds:
+                    ml = model_label(p.model_name)
+                    row[f"{ml} tip"] = p.predicted_outcome or "—"
+                    row[f"{ml} P(H)"] = f"{p.prob_home:.0%}"
+                    row[f"{ml} P(D)"] = f"{p.prob_draw:.0%}"
+                    row[f"{ml} P(A)"] = f"{p.prob_away:.0%}"
+                    vb_all.extend(p.value_bets or [])
+                if vb_all:
+                    row["💰"] = ", ".join(sorted(set(vb_all)))
+                pivot_rows.append(row)
+            st.dataframe(pd.DataFrame(pivot_rows), use_container_width=True, hide_index=True)
+
+        if live:
+            st.markdown("🔴 **Právě hraje / čeká na výsledek**")
+            render_fixture_table(live)
+            st.divider()
+
+        if future:
+            st.markdown("📅 **Nadcházející**")
+            render_fixture_table(future)
+
+        # Value bets highlight (all unresolved)
+        by_fixture_all: dict[int, list] = {}
         for r in upcoming:
-            by_fixture.setdefault(r.fixture_id, []).append(r)
-
-        pivot_rows = []
-        for fixture_id, preds in sorted(by_fixture.items(), key=lambda x: x[1][0].match_date):
-            p0 = preds[0]
-            row = {"Datum": p0.match_date.strftime("%d.%m"), "Domácí": p0.home_team, "Hosté": p0.away_team}
-            vb_all = []
-            for p in preds:
-                ml = model_label(p.model_name)
-                row[f"{ml} tip"] = p.predicted_outcome or "—"
-                row[f"{ml} P(H)"] = f"{p.prob_home:.0%}"
-                row[f"{ml} P(D)"] = f"{p.prob_draw:.0%}"
-                row[f"{ml} P(A)"] = f"{p.prob_away:.0%}"
-                vb_all.extend(p.value_bets or [])
-            if vb_all:
-                row["💰"] = ", ".join(sorted(set(vb_all)))
-            pivot_rows.append(row)
-
-        st.dataframe(pd.DataFrame(pivot_rows), use_container_width=True, hide_index=True)
-
-        # Value bets highlight
+            by_fixture_all.setdefault(r.fixture_id, []).append(r)
         vb_rows = []
-        for fixture_id, preds in by_fixture.items():
+        for fixture_id, preds in by_fixture_all.items():
             for p in preds:
                 if p.value_bets:
                     vb_rows.append({
-                        "Datum": p.match_date.strftime("%d.%m"),
+                        "Datum": p.match_date.strftime("%d.%m %H:%M"),
                         "Zápas": f"{p.home_team} vs {p.away_team}",
                         "Model": model_label(p.model_name),
                         "Tip": ", ".join(p.value_bets),
