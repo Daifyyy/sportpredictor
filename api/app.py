@@ -162,10 +162,6 @@ async def lifespan(app: FastAPI):
     _fetcher = FootballFetcher(client, settings)
 
     Base.metadata.create_all(engine)
-    with engine.connect() as conn:
-        for stmt in _MIGRATIONS.strip().split("\n"):
-            conn.execute(text(stmt))
-        conn.commit()
 
     for league_key in settings.leagues:
         _models[league_key] = {}

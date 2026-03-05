@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from data.models import Fixture
 
@@ -7,301 +7,308 @@ from data.models import Fixture
 class FeatureEngineer:
     """
     Feature pipeline for XGBoost.
-    Each method returns a dict of features — build_features merges them all.
-    Adding new features: add a new method and call it in build_features.
+
+    Call precompute(history) once before a training batch.
+    Caches team index, H2H index, season index, Elo timeline, and avg_goals.
+    build_features() computes home/away matches once per call and passes to sub-functions.
     """
 
     def __init__(self, form_window: int = 5):
         self.form_window = form_window
+        self._cache_key: Optional[int] = None
+        self._team_index:   Dict[int, List[Fixture]] = {}
+        self._home_index:   Dict[int, List[Fixture]] = {}
+        self._away_index:   Dict[int, List[Fixture]] = {}
+        self._h2h_index:    Dict[frozenset, List[Fixture]] = {}
+        self._season_index: Dict[int, List[Fixture]] = {}
+        self._elo_by_fixture: Dict[int, Dict[int, float]] = {}
+        self._elo_final:    Dict[int, float] = {}
+        self._avg_goals:    float = 1.4
+        # Sorted fixture IDs for binary past lookup
+        self._sorted_fixtures: List[Fixture] = []
+        self._fixture_pos:     Dict[int, int] = {}  # fixture_id → position in sorted list
 
-    def build_features(self, fixture: Fixture, history: List[Fixture]) -> Dict[str, float]:
-        home_id = fixture.home_team.id
-        away_id = fixture.away_team.id
+    # ── Precompute ────────────────────────────────────────────────────────────
 
-        # Only use history before this fixture to avoid leakage
-        past = [f for f in history if f.date < fixture.date and f.result is not None]
+    def precompute(self, history: List[Fixture]) -> None:
+        """Build all indexes and precompute Elo. O(n log n) — call once per training batch."""
+        cache_key = id(history)
+        if cache_key == self._cache_key:
+            return
+        self._cache_key = cache_key
 
-        features: Dict[str, float] = {}
-        features.update(self._form_features(home_id, past, prefix="home"))
-        features.update(self._form_features(away_id, past, prefix="away"))
-        features.update(self._venue_form(home_id, past, prefix="home", at_home=True))
-        features.update(self._venue_form(away_id, past, prefix="away", at_home=False))
-        features.update(self._h2h_features(home_id, away_id, past))
-        features.update(self._elo_features(home_id, away_id, past))
-        features.update(self._attack_defense_strength(home_id, away_id, past))
-        features.update(self._streak(home_id, past, prefix="home"))
-        features.update(self._streak(away_id, past, prefix="away"))
-        features.update(self._rest_days(home_id, away_id, past, fixture.date))
-        features.update(self._trend(home_id, past, prefix="home"))
-        features.update(self._trend(away_id, past, prefix="away"))
-        features.update(self._consistency(home_id, past, prefix="home"))
-        features.update(self._consistency(away_id, past, prefix="away"))
-        features.update(self._season_points(home_id, away_id, past, fixture.season))
-        return features
-
-    # ── Existing features (improved) ─────────────────────────────────────────
-
-    def _form_features(self, team_id: int, history: List[Fixture], prefix: str) -> Dict:
-        matches = self._team_matches(team_id, history)[-self.form_window:]
-        if not matches:
-            return {f"{prefix}_form": 0.0, f"{prefix}_gf": 0.0, f"{prefix}_ga": 0.0}
-
-        points, gf, ga = [], [], []
-        for f in matches:
-            is_home = f.home_team.id == team_id
-            r = f.result
-            scored = r.home_goals if is_home else r.away_goals
-            conceded = r.away_goals if is_home else r.home_goals
-            outcome = r.outcome
-            pts = 3 if (outcome == 'H' and is_home) or (outcome == 'A' and not is_home) else \
-                  1 if outcome == 'D' else 0
-            points.append(pts)
-            gf.append(scored)
-            ga.append(conceded)
-
-        return {
-            f"{prefix}_form": np.mean(points) if points else 0.0,
-            f"{prefix}_gf":   np.mean(gf)     if gf     else 0.0,
-            f"{prefix}_ga":   np.mean(ga)      if ga     else 0.0,
-        }
-
-    def _h2h_features(self, home_id: int, away_id: int, history: List[Fixture]) -> Dict:
-        h2h = [
-            f for f in history
-            if {f.home_team.id, f.away_team.id} == {home_id, away_id}
-        ][-10:]
-
-        if not h2h:
-            return {"h2h_home_wins": 0.5, "h2h_draws": 0.33, "h2h_away_wins": 0.17,
-                    "h2h_home_gf": 1.5, "h2h_away_gf": 1.2}
-
-        total = len(h2h)
-        home_wins = sum(
-            1 for f in h2h
-            if (f.home_team.id == home_id and f.result.outcome == 'H') or
-               (f.away_team.id == home_id and f.result.outcome == 'A')
+        sorted_hist = sorted(
+            [f for f in history if f.result is not None], key=lambda x: x.date
         )
-        draws = sum(1 for f in h2h if f.result.outcome == 'D')
+        self._sorted_fixtures = sorted_hist
+        self._fixture_pos = {f.id: i for i, f in enumerate(sorted_hist)}
 
-        home_gf = np.mean([
-            r.home_goals if f.home_team.id == home_id else r.away_goals
-            for f in h2h if (r := f.result)
-        ])
-        away_gf = np.mean([
-            r.away_goals if f.home_team.id == home_id else r.home_goals
-            for f in h2h if (r := f.result)
-        ])
-        return {
-            "h2h_home_wins": home_wins / total,
-            "h2h_draws":     draws / total,
-            "h2h_away_wins": (total - home_wins - draws) / total,
-            "h2h_home_gf":   float(home_gf),
-            "h2h_away_gf":   float(away_gf),
-        }
+        # Team / home / away / H2H / season indexes
+        self._team_index = {}
+        self._home_index = {}
+        self._away_index = {}
+        self._h2h_index = {}
+        self._season_index = {}
 
-    def _elo_features(self, home_id: int, away_id: int, history: List[Fixture]) -> Dict:
+        for f in sorted_hist:
+            h, a = f.home_team.id, f.away_team.id
+            pair = frozenset((h, a))
+
+            self._team_index.setdefault(h, []).append(f)
+            self._team_index.setdefault(a, []).append(f)
+            self._home_index.setdefault(h, []).append(f)
+            self._away_index.setdefault(a, []).append(f)
+            self._h2h_index.setdefault(pair, []).append(f)
+            self._season_index.setdefault(f.season, []).append(f)
+
+        # Elo timeline — O(n), snapshot before each match
         elo: Dict[int, float] = {}
         K = 32
+        self._elo_by_fixture = {}
 
-        for f in sorted(history, key=lambda x: x.date):
+        for f in sorted_hist:
             h, a = f.home_team.id, f.away_team.id
             elo.setdefault(h, 1500.0)
             elo.setdefault(a, 1500.0)
+            self._elo_by_fixture[f.id] = {h: elo[h], a: elo[a]}  # only store needed teams
             exp_h = 1 / (1 + 10 ** ((elo[a] - elo[h]) / 400))
             score_h = {'H': 1.0, 'D': 0.5, 'A': 0.0}[f.result.outcome]
             elo[h] += K * (score_h - exp_h)
             elo[a] += K * ((1 - score_h) - (1 - exp_h))
 
-        home_elo = elo.get(home_id, 1500.0)
-        away_elo = elo.get(away_id, 1500.0)
-        return {
+        self._elo_final = dict(elo)
+
+        # Rolling avg_goals snapshot per fixture — no leakage
+        self._avg_goals_by_fixture: Dict[int, float] = {}
+        cumulative_goals = 0.0
+        for i, f in enumerate(sorted_hist):
+            if i > 0:
+                self._avg_goals_by_fixture[f.id] = (cumulative_goals / i) / 2
+            else:
+                self._avg_goals_by_fixture[f.id] = 1.4  # prior for first match
+            cumulative_goals += f.result.home_goals + f.result.away_goals
+
+        # Fallback: overall average (used for upcoming fixtures)
+        if sorted_hist:
+            self._avg_goals = float(np.mean(
+                [f.result.home_goals + f.result.away_goals for f in sorted_hist]
+            )) / 2
+
+    # ── Build features ────────────────────────────────────────────────────────
+
+    def build_features(self, fixture: Fixture, history: List[Fixture]) -> Dict[str, float]:
+        home_id = fixture.home_team.id
+        away_id = fixture.away_team.id
+        pair = frozenset((home_id, away_id))
+
+        # Get past cutoff position once — O(1) with index
+        pos = self._fixture_pos.get(fixture.id)
+        if pos is not None and self._sorted_fixtures:
+            # Use sorted index for O(log n) past lookup
+            past_set = {f.id for f in self._sorted_fixtures[:pos]}
+        else:
+            # Fallback: linear filter
+            past_set = {f.id for f in history if f.date < fixture.date and f.result is not None}
+
+        # Compute home/away matches ONCE — O(team_matches) with index
+        home_matches = [f for f in self._team_index.get(home_id, []) if f.id in past_set]
+        away_matches = [f for f in self._team_index.get(away_id, []) if f.id in past_set]
+        home_home_m  = [f for f in self._home_index.get(home_id, []) if f.id in past_set]
+        away_away_m  = [f for f in self._away_index.get(away_id, []) if f.id in past_set]
+        h2h_matches  = [f for f in self._h2h_index.get(pair, []) if f.id in past_set][-10:]
+        season_home  = [f for f in self._season_index.get(fixture.season, [])
+                        if f.id in past_set and (f.home_team.id == home_id or f.away_team.id == home_id)]
+        season_away  = [f for f in self._season_index.get(fixture.season, [])
+                        if f.id in past_set and (f.home_team.id == away_id or f.away_team.id == away_id)]
+
+        # Elo — O(1) dict lookup
+        elo_snap = self._elo_by_fixture.get(fixture.id, {})
+        home_elo = elo_snap.get(home_id, self._elo_final.get(home_id, 1500.0))
+        away_elo = elo_snap.get(away_id, self._elo_final.get(away_id, 1500.0))
+
+        features: Dict[str, float] = {}
+        features.update(self._form(home_matches, home_id, prefix="home"))
+        features.update(self._form(away_matches, away_id, prefix="away"))
+        features.update(self._venue_form(home_home_m, home_id, prefix="home", at_home=True))
+        features.update(self._venue_form(away_away_m, away_id, prefix="away", at_home=False))
+        features.update(self._h2h(h2h_matches, home_id))
+        features.update({
             "elo_home": home_elo,
             "elo_away": away_elo,
             "elo_diff": home_elo - away_elo,
-        }
+        })
+        features.update(self._attack_defense(home_matches, away_matches, home_id, away_id, fixture.id))
+        features.update(self._streak(home_matches, home_id, prefix="home"))
+        features.update(self._streak(away_matches, away_id, prefix="away"))
+        features.update(self._rest_days(home_matches, away_matches, fixture.date))
+        features.update(self._trend(home_matches, home_id, prefix="home"))
+        features.update(self._trend(away_matches, away_id, prefix="away"))
+        features.update(self._consistency(home_matches, home_id, prefix="home"))
+        features.update(self._consistency(away_matches, away_id, prefix="away"))
+        features.update(self._season_ppg(season_home, season_away, home_id, away_id))
+        return features
 
-    # ── New features ─────────────────────────────────────────────────────────
+    # ── Feature functions (accept pre-filtered matches) ───────────────────────
 
-    def _venue_form(self, team_id: int, history: List[Fixture], prefix: str, at_home: bool) -> Dict:
-        """Form split by home/away venue — teams often perform very differently."""
-        if at_home:
-            matches = [f for f in history if f.home_team.id == team_id][-self.form_window:]
-        else:
-            matches = [f for f in history if f.away_team.id == team_id][-self.form_window:]
-
-        if not matches:
-            return {f"{prefix}_venue_form": 0.0, f"{prefix}_venue_gf": 0.0, f"{prefix}_venue_ga": 0.0}
-
-        points, gf, ga = [], [], []
-        for f in matches:
+    def _form(self, matches: List[Fixture], team_id: int, prefix: str) -> Dict:
+        recent = matches[-self.form_window:]
+        if not recent:
+            return {f"{prefix}_form": 0.0, f"{prefix}_gf": 0.0, f"{prefix}_ga": 0.0}
+        pts, gf, ga = [], [], []
+        for f in recent:
+            is_home = f.home_team.id == team_id
             r = f.result
-            scored = r.home_goals if at_home else r.away_goals
+            scored   = r.home_goals if is_home else r.away_goals
+            conceded = r.away_goals if is_home else r.home_goals
+            o = r.outcome
+            p = 3 if (o == 'H' and is_home) or (o == 'A' and not is_home) else 1 if o == 'D' else 0
+            pts.append(p); gf.append(scored); ga.append(conceded)
+        return {
+            f"{prefix}_form": float(np.mean(pts)),
+            f"{prefix}_gf":   float(np.mean(gf)),
+            f"{prefix}_ga":   float(np.mean(ga)),
+        }
+
+    def _venue_form(self, matches: List[Fixture], team_id: int, prefix: str, at_home: bool) -> Dict:
+        recent = matches[-self.form_window:]
+        if not recent:
+            return {f"{prefix}_venue_form": 0.0, f"{prefix}_venue_gf": 0.0, f"{prefix}_venue_ga": 0.0}
+        pts, gf, ga = [], [], []
+        for f in recent:
+            r = f.result
+            scored   = r.home_goals if at_home else r.away_goals
             conceded = r.away_goals if at_home else r.home_goals
-            outcome = r.outcome
-            pts = 3 if (outcome == 'H' and at_home) or (outcome == 'A' and not at_home) else \
-                  1 if outcome == 'D' else 0
-            points.append(pts)
-            gf.append(scored)
-            ga.append(conceded)
-
+            o = r.outcome
+            p = 3 if (o == 'H' and at_home) or (o == 'A' and not at_home) else 1 if o == 'D' else 0
+            pts.append(p); gf.append(scored); ga.append(conceded)
         return {
-            f"{prefix}_venue_form": np.mean(points) if points else 0.0,
-            f"{prefix}_venue_gf":   np.mean(gf)     if gf     else 0.0,
-            f"{prefix}_venue_ga":   np.mean(ga)      if ga     else 0.0,
+            f"{prefix}_venue_form": float(np.mean(pts)),
+            f"{prefix}_venue_gf":   float(np.mean(gf)),
+            f"{prefix}_venue_ga":   float(np.mean(ga)),
         }
 
-    def _attack_defense_strength(self, home_id: int, away_id: int, history: List[Fixture]) -> Dict:
-        """Goals scored/conceded relative to league average."""
-        completed = [f for f in history if f.result is not None]
-        if not completed:
-            return {"home_attack_str": 1.0, "home_defense_str": 1.0,
-                    "away_attack_str": 1.0, "away_defense_str": 1.0}
+    def _h2h(self, h2h: List[Fixture], home_id: int) -> Dict:
+        if not h2h:
+            return {"h2h_home_wins": 0.5, "h2h_draws": 0.33, "h2h_away_wins": 0.17,
+                    "h2h_home_gf": 1.5, "h2h_away_gf": 1.2}
+        total = len(h2h)
+        home_wins = draws = 0
+        home_gf_list, away_gf_list = [], []
+        for f in h2h:
+            r = f.result
+            is_home = f.home_team.id == home_id
+            o = r.outcome
+            if (o == 'H' and is_home) or (o == 'A' and not is_home):
+                home_wins += 1
+            elif o == 'D':
+                draws += 1
+            home_gf_list.append(r.home_goals if is_home else r.away_goals)
+            away_gf_list.append(r.away_goals if is_home else r.home_goals)
+        return {
+            "h2h_home_wins": home_wins / total,
+            "h2h_draws":     draws / total,
+            "h2h_away_wins": (total - home_wins - draws) / total,
+            "h2h_home_gf":   float(np.mean(home_gf_list)),
+            "h2h_away_gf":   float(np.mean(away_gf_list)),
+        }
 
-        avg_goals = np.mean([f.result.home_goals + f.result.away_goals for f in completed]) / 2
+    def _attack_defense(self, home_m: List[Fixture], away_m: List[Fixture],
+                        home_id: int, away_id: int, fixture_id: int = 0) -> Dict:
+        avg = self._avg_goals_by_fixture.get(fixture_id, self._avg_goals)
 
-        def strength(team_id: int):
-            matches = self._team_matches(team_id, history)[-10:]
-            if not matches or avg_goals == 0:
+        def strength(matches: List[Fixture], team_id: int) -> Tuple[float, float]:
+            recent = matches[-10:]
+            if not recent or avg == 0:
                 return 1.0, 1.0
-            gf_list, ga_list = [], []
-            for f in matches:
-                r = f.result
+            gf, ga = [], []
+            for f in recent:
                 is_home = f.home_team.id == team_id
-                gf_list.append(r.home_goals if is_home else r.away_goals)
-                ga_list.append(r.away_goals if is_home else r.home_goals)
-            return np.mean(gf_list) / avg_goals, np.mean(ga_list) / avg_goals
+                r = f.result
+                gf.append(r.home_goals if is_home else r.away_goals)
+                ga.append(r.away_goals if is_home else r.home_goals)
+            return float(np.mean(gf)) / avg, float(np.mean(ga)) / avg
 
-        h_att, h_def = strength(home_id)
-        a_att, a_def = strength(away_id)
+        h_att, h_def = strength(home_m, home_id)
+        a_att, a_def = strength(away_m, away_id)
         return {
-            "home_attack_str":  round(float(h_att), 4),
-            "home_defense_str": round(float(h_def), 4),
-            "away_attack_str":  round(float(a_att), 4),
-            "away_defense_str": round(float(a_def), 4),
-            "attack_str_diff":  round(float(h_att - a_att), 4),
-            "defense_str_diff": round(float(a_def - h_def), 4),  # high = home defense stronger
+            "home_attack_str":  round(h_att, 4),
+            "home_defense_str": round(h_def, 4),
+            "away_attack_str":  round(a_att, 4),
+            "away_defense_str": round(a_def, 4),
+            "attack_str_diff":  round(h_att - a_att, 4),
+            "defense_str_diff": round(a_def - h_def, 4),
         }
 
-    def _streak(self, team_id: int, history: List[Fixture], prefix: str) -> Dict:
-        """Current win/loss/draw streak. Positive = wins, negative = losses."""
-        matches = self._team_matches(team_id, history)
+    def _streak(self, matches: List[Fixture], team_id: int, prefix: str) -> Dict:
         if not matches:
-            return {f"{prefix}_streak": 0}
-
+            return {f"{prefix}_streak": 0.0}
         streak = 0
-        last_result = None
+        last = None
         for f in reversed(matches):
             is_home = f.home_team.id == team_id
-            outcome = f.result.outcome
-            won = (outcome == 'H' and is_home) or (outcome == 'A' and not is_home)
-            lost = (outcome == 'A' and is_home) or (outcome == 'H' and not is_home)
-            drew = outcome == 'D'
-
-            if last_result is None:
-                last_result = 'W' if won else ('L' if lost else 'D')
+            o = f.result.outcome
+            won  = (o == 'H' and is_home) or (o == 'A' and not is_home)
+            lost = (o == 'A' and is_home) or (o == 'H' and not is_home)
+            cur = 'W' if won else ('L' if lost else 'D')
+            if last is None:
+                last = cur
                 streak = 1 if won else (-1 if lost else 0)
+            elif cur == last and last != 'D':
+                streak += 1 if won else -1
             else:
-                current = 'W' if won else ('L' if lost else 'D')
-                if current == last_result and last_result != 'D':
-                    streak += 1 if won else -1
-                else:
-                    break
-
+                break
         return {f"{prefix}_streak": float(streak)}
 
-    def _rest_days(self, home_id: int, away_id: int, history: List[Fixture],
+    def _rest_days(self, home_m: List[Fixture], away_m: List[Fixture],
                    fixture_date: datetime) -> Dict:
-        """Days since last match — fatigue proxy."""
-        def last_match_days(team_id: int) -> float:
-            matches = self._team_matches(team_id, history)
+        def days(matches: List[Fixture]) -> float:
             if not matches:
-                return 7.0  # neutral default
-            last_date = matches[-1].date
-            delta = fixture_date - last_date
-            return min(float(delta.days), 30.0)  # cap at 30
+                return 7.0
+            return min(float((fixture_date - matches[-1].date).days), 30.0)
+        h = days(home_m)
+        a = days(away_m)
+        return {"home_rest_days": h, "away_rest_days": a, "rest_days_diff": h - a}
 
-        return {
-            "home_rest_days": last_match_days(home_id),
-            "away_rest_days": last_match_days(away_id),
-            "rest_days_diff": last_match_days(home_id) - last_match_days(away_id),
-        }
-
-    def _trend(self, team_id: int, history: List[Fixture], prefix: str) -> Dict:
-        """Recent trend: last 3 form vs last 8 form. Positive = improving."""
-        matches = self._team_matches(team_id, history)
-
+    def _trend(self, matches: List[Fixture], team_id: int, prefix: str) -> Dict:
         def avg_pts(last_n: int) -> float:
             recent = matches[-last_n:] if len(matches) >= last_n else matches
             if not recent:
                 return 1.0
-            pts_list = []
+            pts = []
             for f in recent:
                 is_home = f.home_team.id == team_id
-                outcome = f.result.outcome
-                pts = 3 if (outcome == 'H' and is_home) or (outcome == 'A' and not is_home) else \
-                      1 if outcome == 'D' else 0
-                pts_list.append(pts)
-            return np.mean(pts_list)
-
+                o = f.result.outcome
+                pts.append(3 if (o == 'H' and is_home) or (o == 'A' and not is_home) else 1 if o == 'D' else 0)
+            return float(np.mean(pts))
         short = avg_pts(3)
         long_ = avg_pts(8)
-        return {
-            f"{prefix}_trend": round(float(short - long_), 4),  # positive = improving
-            f"{prefix}_form_short": round(float(short), 4),
-        }
+        return {f"{prefix}_trend": round(short - long_, 4), f"{prefix}_form_short": round(short, 4)}
 
-    def _consistency(self, team_id: int, history: List[Fixture], prefix: str) -> Dict:
-        """Goals scored variance — low = consistent, high = unpredictable."""
-        matches = self._team_matches(team_id, history)[-10:]
-        if len(matches) < 3:
+    def _consistency(self, matches: List[Fixture], team_id: int, prefix: str) -> Dict:
+        recent = matches[-10:]
+        if len(recent) < 3:
             return {f"{prefix}_gf_std": 1.0, f"{prefix}_ga_std": 1.0}
-
-        gf_list, ga_list = [], []
-        for f in matches:
+        gf, ga = [], []
+        for f in recent:
             is_home = f.home_team.id == team_id
-            gf_list.append(f.result.home_goals if is_home else f.result.away_goals)
-            ga_list.append(f.result.away_goals if is_home else f.result.home_goals)
-
+            gf.append(f.result.home_goals if is_home else f.result.away_goals)
+            ga.append(f.result.away_goals if is_home else f.result.home_goals)
         return {
-            f"{prefix}_gf_std": round(float(np.std(gf_list)), 4),
-            f"{prefix}_ga_std": round(float(np.std(ga_list)), 4),
+            f"{prefix}_gf_std": round(float(np.std(gf)), 4),
+            f"{prefix}_ga_std": round(float(np.std(ga)), 4),
         }
 
-    def _season_points(self, home_id: int, away_id: int, history: List[Fixture],
-                       season: int) -> Dict:
-        """Cumulative points in current season — proxy for table position."""
-        season_matches = [f for f in history if f.season == season]
-
-        def pts_in_season(team_id: int) -> float:
-            matches = self._team_matches(team_id, season_matches)
-            total = 0
+    def _season_ppg(self, home_season: List[Fixture], away_season: List[Fixture],
+                    home_id: int, away_id: int) -> Dict:
+        def ppg(matches: List[Fixture], team_id: int) -> float:
+            if not matches:
+                return 1.2
+            pts = 0
             for f in matches:
                 is_home = f.home_team.id == team_id
-                outcome = f.result.outcome
-                total += 3 if (outcome == 'H' and is_home) or (outcome == 'A' and not is_home) else \
-                         1 if outcome == 'D' else 0
-            return float(total)
-
-        def ppg(team_id: int) -> float:
-            matches = self._team_matches(team_id, season_matches)
-            if not matches:
-                return 1.2  # league average ~1.2 ppg
-            return pts_in_season(team_id) / len(matches)
-
-        home_ppg = ppg(home_id)
-        away_ppg = ppg(away_id)
-        return {
-            "home_season_ppg": round(home_ppg, 4),
-            "away_season_ppg": round(away_ppg, 4),
-            "season_ppg_diff": round(home_ppg - away_ppg, 4),
-        }
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def _team_matches(self, team_id: int, history: List[Fixture]) -> List[Fixture]:
-        return sorted(
-            [f for f in history
-             if (f.home_team.id == team_id or f.away_team.id == team_id)
-             and f.result is not None],
-            key=lambda x: x.date
-        )
+                o = f.result.outcome
+                pts += 3 if (o == 'H' and is_home) or (o == 'A' and not is_home) else 1 if o == 'D' else 0
+            return pts / len(matches)
+        h = ppg(home_season, home_id)
+        a = ppg(away_season, away_id)
+        return {"home_season_ppg": round(h, 4), "away_season_ppg": round(a, 4), "season_ppg_diff": round(h - a, 4)}

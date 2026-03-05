@@ -50,10 +50,10 @@ class Settings:
 
     leagues: Dict[str, LeagueConfig] = field(default_factory=lambda: {
         "premier_league": LeagueConfig(39,  "Premier League", "England", season=2025, seasons=(2022, 2023, 2024, 2025)),
-        # "la_liga":        LeagueConfig(140, "La Liga",        "Spain"),
-        # "bundesliga":     LeagueConfig(78,  "Bundesliga",     "Germany"),
-        # "serie_a":        LeagueConfig(135, "Serie A",        "Italy"),
-        # "ligue_1":        LeagueConfig(61,  "Ligue 1",        "France"),
+        "la_liga":        LeagueConfig(140, "La Liga",        "Spain",   season=2025, seasons=(2022, 2023, 2024, 2025)),
+        "bundesliga":     LeagueConfig(78,  "Bundesliga",     "Germany", season=2025, seasons=(2022, 2023, 2024, 2025)),
+        "serie_a":        LeagueConfig(135, "Serie A",        "Italy",   season=2025, seasons=(2022, 2023, 2024, 2025)),
+        "ligue_1":        LeagueConfig(61,  "Ligue 1",        "France",  season=2025, seasons=(2022, 2023, 2024, 2025)),
     })
 
 

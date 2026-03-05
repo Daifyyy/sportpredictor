@@ -38,27 +38,42 @@ class DixonColesPredictor(BasePredictor):
         team_idx = {t: i for i, t in enumerate(teams)}
         n = len(teams)
 
+        # Pre-compute index/goal arrays once — avoids Python loop inside optimizer
+        hi_arr = np.array([team_idx[f.home_team.id] for f in completed])
+        ai_arr = np.array([team_idx[f.away_team.id] for f in completed])
+        hg_arr = np.array([f.result.home_goals for f in completed], dtype=np.int32)
+        ag_arr = np.array([f.result.away_goals for f in completed], dtype=np.int32)
+
+        # Boolean masks for DC tau correction (only 0-0, 0-1, 1-0, 1-1)
+        m00 = (hg_arr == 0) & (ag_arr == 0)
+        m01 = (hg_arr == 0) & (ag_arr == 1)
+        m10 = (hg_arr == 1) & (ag_arr == 0)
+        m11 = (hg_arr == 1) & (ag_arr == 1)
+
         def log_likelihood(params):
             attack  = params[:n]
             defence = params[n:2*n]
             home    = params[2*n]
             rho     = params[2*n + 1]
-            ll = 0
-            for f in completed:
-                hi = team_idx[f.home_team.id]
-                ai = team_idx[f.away_team.id]
-                lam = np.exp(attack[hi] - defence[ai] + home)
-                mu  = np.exp(attack[ai] - defence[hi])
-                hg, ag = f.result.home_goals, f.result.away_goals
-                t = self._tau(hg, ag, lam, mu, rho)
-                if t <= 0:
-                    return np.inf
-                ll -= (poisson.logpmf(hg, lam) + poisson.logpmf(ag, mu) + np.log(t))
+
+            lam = np.exp(attack[hi_arr] - defence[ai_arr] + home)
+            mu  = np.exp(attack[ai_arr] - defence[hi_arr])
+
+            ll = -(poisson.logpmf(hg_arr, lam).sum() + poisson.logpmf(ag_arr, mu).sum())
+
+            tau = np.ones(len(completed))
+            tau[m00] = 1 - lam[m00] * mu[m00] * rho
+            tau[m01] = 1 + lam[m01] * rho
+            tau[m10] = 1 + mu[m10] * rho
+            tau[m11] = 1 - rho
+            if np.any(tau <= 0):
+                return 1e15
+            ll -= np.log(tau).sum()
             return ll
 
         x0 = np.zeros(2 * n + 2)
         x0[2 * n]     = self.home_advantage
-        x0[2 * n + 1] = -0.13  # initial rho
+        x0[2 * n + 1] = -0.13
         bounds = [(None, None)] * (2 * n + 1) + [(-0.99, 0.99)]
         res = minimize(log_likelihood, x0, method='L-BFGS-B', bounds=bounds)
 

@@ -16,7 +16,7 @@ import streamlit as st
 
 from config.settings import settings
 from db.models import BacktestRunRow, BankrollRow, PredictionRow
-from db.session import SessionLocal
+from db.session import engine
 
 API = "http://127.0.0.1:8000"
 
@@ -26,12 +26,10 @@ st.title("⚽ Football Predictor Dashboard")
 
 # ── DB connection ─────────────────────────────────────────────────────────────
 
-@st.cache_resource
-def get_db():
-    return SessionLocal()
+from sqlalchemy.orm import Session as SASession
 
-
-db = get_db()
+def get_db() -> SASession:
+    return SASession(engine)
 
 
 # ── API availability check ────────────────────────────────────────────────────
@@ -61,6 +59,11 @@ league = st.sidebar.selectbox(
     options=list(leagues_display.keys()),
     format_func=lambda k: leagues_display[k],
 )
+
+# Auto-load predictions when league changes
+if st.session_state.get("last_league") != league:
+    st.session_state["last_league"] = league
+    st.cache_data.clear()
 
 st.sidebar.divider()
 st.sidebar.subheader("Akce")
@@ -135,17 +138,17 @@ if st.session_state.get("show_retrain_log"):
         steps = rs.get("steps", [])
         error = rs.get("error")
         icons = {"info": "ℹ️", "success": "✅", "warning": "⚠️", "error": "❌"}
-        label = "🧠 Trénink probíhá..." if is_running else ("❌ Chyba" if error else "✅ Hotovo")
-        state = "running" if is_running else ("error" if error else "complete")
-        with st.status(label, expanded=is_running, state=state):
-            for step in steps:
+        header = "🧠 Trénink probíhá..." if is_running else ("❌ Trénink selhal" if error else "✅ Trénink dokončen")
+        with st.container(border=True):
+            st.write(f"**{header}**")
+            for step in steps[-30:]:
                 st.write(f"`{step['time']}` {icons.get(step['level'], 'ℹ️')} {step['msg']}")
         if is_running:
             import time; time.sleep(2); st.rerun()
         else:
             st.session_state["show_retrain_log"] = False
     except Exception:
-        pass
+        st.session_state["show_retrain_log"] = False
 
 st.divider()
 
@@ -165,19 +168,22 @@ def model_label(name: str) -> str:
 
 @st.cache_data(ttl=300)
 def load_predictions(league_key: str):
-    return db.query(PredictionRow).filter(PredictionRow.league_key == league_key).all()
+    with get_db() as db:
+        return db.query(PredictionRow).filter(PredictionRow.league_key == league_key).all()
 
 
 @st.cache_data(ttl=300)
 def load_bankroll(league_key: str):
-    return db.query(BankrollRow).filter(BankrollRow.league_key == league_key)\
-        .order_by(BankrollRow.match_date).all()
+    with get_db() as db:
+        return db.query(BankrollRow).filter(BankrollRow.league_key == league_key)\
+            .order_by(BankrollRow.match_date).all()
 
 
 @st.cache_data(ttl=300)
 def load_backtest(league_key: str):
-    return db.query(BacktestRunRow).filter(BacktestRunRow.league_key == league_key)\
-        .order_by(BacktestRunRow.run_at.desc()).all()
+    with get_db() as db:
+        return db.query(BacktestRunRow).filter(BacktestRunRow.league_key == league_key)\
+            .order_by(BacktestRunRow.run_at.desc()).all()
 
 
 # ── TAB 1: Predikce ───────────────────────────────────────────────────────────
@@ -253,7 +259,10 @@ with tab_perf:
         for mname, mrows in by_model.items():
             correct = [r for r in mrows if r.correct]
             vb = [r for r in mrows if r.value_bets]
-            vb_ok = [r for r in vb if r.correct]
+            # VB won = any value-bet outcome matches actual (not same as predicted_outcome)
+            vb_ok = [r for r in vb if r.actual_outcome and any(
+                v[0] == r.actual_outcome for v in r.value_bets
+            )]
             perf_rows.append({
                 "Model": model_label(mname),
                 "Vyřešeno": len(mrows),
@@ -473,12 +482,15 @@ with tab_cal:
                     col.warning(f"**{model_label(mname)}**\n\n⏳ Chybí {needed} predikcí")
             st.divider()
 
-        with st.spinner("Načítám kalibraci (backtest, 1–2 min)..."):
-            try:
-                r = requests.get(f"{API}/calibration/{league}", timeout=300)
-                cal_data = r.json() if r.ok else []
-            except Exception:
-                cal_data = []
+        if st.button("📊 Načíst kalibraci (1–2 min)", key="load_cal"):
+            with st.spinner("Načítám kalibraci..."):
+                try:
+                    r = requests.get(f"{API}/calibration/{league}", timeout=300)
+                    st.session_state["cal_data"] = r.json() if r.ok else []
+                except Exception:
+                    st.session_state["cal_data"] = []
+
+        cal_data = st.session_state.get("cal_data", [])
 
         if not cal_data:
             st.warning("Kalibrace nedostupná.")

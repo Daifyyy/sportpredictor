@@ -35,6 +35,7 @@ class XGBoostPredictor(BasePredictor):
         if not completed:
             return
 
+        self._engineer.precompute(completed)
         raw = [self._engineer.build_features(f, completed) for f in completed]
         self._feature_names = sorted(raw[0].keys())
         X = np.array([[row[k] for k in self._feature_names] for row in raw])
