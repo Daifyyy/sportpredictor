@@ -34,7 +34,7 @@ MODEL_CLASSES: dict[str, type[BasePredictor]] = {
 _models: dict[str, dict[str, BasePredictor]] = {}
 _calibrators: dict[str, dict[str, ProbabilityCalibrator]] = {}
 _fetcher: Optional[FootballFetcher] = None
-_detector = ValueBetDetector(min_edge=0.03)
+_detector = ValueBetDetector(min_edge=0.03, min_prob=0.60, max_odds=2.7)
 
 _retrain_status: dict = {
     "running": False,
