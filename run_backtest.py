@@ -3,7 +3,6 @@ from config.settings import settings
 from api.client import APIClient
 from data.fetcher import FootballFetcher
 from models.poisson import DixonColesPredictor
-from models.xgboost_model import XGBoostPredictor
 from backtesting.engine import BacktestEngine
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
@@ -15,7 +14,6 @@ def run():
 
     models = [
         DixonColesPredictor(),
-        XGBoostPredictor(),
     ]
 
     for league_key, league in settings.leagues.items():

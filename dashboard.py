@@ -216,6 +216,12 @@ with tab_pred:
                     row[f"{ml} P(H)"] = f"{p.prob_home:.0%}"
                     row[f"{ml} P(D)"] = f"{p.prob_draw:.0%}"
                     row[f"{ml} P(A)"] = f"{p.prob_away:.0%}"
+                    gp = p.goal_probs or {}
+                    if gp:
+                        row[f"{ml} u2.5"] = f"{gp.get('u2.5', 0):.0%}"
+                        row[f"{ml} o2.5"] = f"{gp.get('o2.5', 0):.0%}"
+                        row[f"{ml} 1-3g"] = f"{gp.get('1-3', 0):.0%}"
+                        row[f"{ml} 2-4g"] = f"{gp.get('2-4', 0):.0%}"
                     vb_all.extend(p.value_bets or [])
                 if vb_all:
                     row["💰"] = ", ".join(sorted(set(vb_all)))

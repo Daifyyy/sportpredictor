@@ -6,7 +6,7 @@ from data.models import Fixture
 
 class FeatureEngineer:
     """
-    Feature pipeline for XGBoost.
+    Feature pipeline for match prediction models.
 
     Call precompute(history) once before a training batch.
     Caches team index, H2H index, season index, Elo timeline, and avg_goals.

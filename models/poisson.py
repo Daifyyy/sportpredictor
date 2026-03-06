@@ -104,6 +104,25 @@ class DixonColesPredictor(BasePredictor):
         prob_draw = float(np.sum(np.diag(prob_matrix)))
         prob_away = float(np.sum(np.triu(prob_matrix, 1)))
 
+        # Total goals distribution (index = total goals in match)
+        tg = np.zeros(max_goals * 2 - 1)
+        for i in range(max_goals):
+            for j in range(max_goals):
+                tg[i + j] += prob_matrix[i, j]
+
+        goal_probs = {
+            "u1.5": round(float(tg[:2].sum()), 4),
+            "o1.5": round(float(tg[2:].sum()), 4),
+            "u2.5": round(float(tg[:3].sum()), 4),
+            "o2.5": round(float(tg[3:].sum()), 4),
+            "u3.5": round(float(tg[:4].sum()), 4),
+            "o3.5": round(float(tg[4:].sum()), 4),
+            "u4.5": round(float(tg[:5].sum()), 4),
+            "o4.5": round(float(tg[5:].sum()), 4),
+            "1-3":  round(float(tg[1:4].sum()), 4),
+            "2-4":  round(float(tg[2:5].sum()), 4),
+        }
+
         return Prediction(
             fixture_id=fixture.id,
             prob_home=prob_home,
@@ -112,6 +131,7 @@ class DixonColesPredictor(BasePredictor):
             model_name=self.name,
             expected_goals_home=float(lam),
             expected_goals_away=float(mu),
+            goal_probs=goal_probs,
         )
 
     def _dc_correction(self, matrix, lam, mu, rho: float):

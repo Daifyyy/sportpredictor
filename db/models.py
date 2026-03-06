@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, mapped_column, Mapped
 
 
@@ -26,6 +26,7 @@ class PredictionRow(Base):
     xg_home: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     xg_away: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     value_bets: Mapped[list] = mapped_column(ARRAY(String), nullable=True)
+    goal_probs: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     # Outcome tracking
     predicted_outcome: Mapped[Optional[str]] = mapped_column(String(1), nullable=True)  # H / D / A
     actual_outcome: Mapped[Optional[str]] = mapped_column(String(1), nullable=True)     # filled after FT

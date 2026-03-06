@@ -5,7 +5,6 @@ from api.client import APIClient
 from data.fetcher import FootballFetcher
 from features.engineer import FeatureEngineer
 from models.poisson import DixonColesPredictor
-from models.xgboost_model import XGBoostPredictor
 from betting.value import ValueBetDetector
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
@@ -42,14 +41,6 @@ def run():
             model.train(history)
             model.save(model_path)
             logging.info(f"Model uložen: {model_path}")
-
-        xgb_path = MODELS_DIR / f"xgboost_{league_key}.joblib"
-        if not xgb_path.exists():
-            logging.info(f"Trénuji XGBoost pro {league.name}...")
-            xgb = XGBoostPredictor()
-            xgb.train(history)
-            xgb.save(xgb_path)
-            logging.info(f"Model uložen: {xgb_path}")
 
         for fixture in upcoming:
             prediction = model.predict(fixture, history)

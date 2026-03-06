@@ -22,16 +22,13 @@ from db.models import BacktestRunRow, BankrollRow, Base, PredictionRow
 from db.session import SessionLocal, engine, get_db
 from models.base import BasePredictor
 from models.calibrator import ProbabilityCalibrator
-from models.ensemble import EnsemblePredictor
 from models.poisson import DixonColesPredictor
-from models.xgboost_model import XGBoostPredictor
 
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models/saved")
 MODEL_CLASSES: dict[str, type[BasePredictor]] = {
     "dixon_coles": DixonColesPredictor,
-    "xgboost": XGBoostPredictor,
 }
 
 _models: dict[str, dict[str, BasePredictor]] = {}
@@ -109,6 +106,7 @@ def _scheduled_predictions():
                         xg_home=pred.expected_goals_home,
                         xg_away=pred.expected_goals_away,
                         value_bets=pred.value_bets or [],
+                        goal_probs=pred.goal_probs or {},
                         predicted_outcome=po,
                         odds_home=bet365.home_win if bet365 else None,
                         odds_draw=bet365.draw if bet365 else None,
@@ -179,12 +177,8 @@ async def lifespan(app: FastAPI):
             else:
                 logger.warning(f"Model not found: {path} — run main.py first")
 
-        if len(base_models) >= 2:
-            _models[league_key]["ensemble"] = EnsemblePredictor(base_models)
-            logger.info(f"Ensemble ready for {league_key} ({len(base_models)} models)")
-
         _calibrators[league_key] = {}
-        for model_name in list(MODEL_CLASSES.keys()) + ["ensemble"]:
+        for model_name in MODEL_CLASSES.keys():
             cal_path = MODELS_DIR / f"calibrator_{model_name}_{league_key}.joblib"
             if cal_path.exists():
                 try:
@@ -249,6 +243,7 @@ class ModelPrediction(BaseModel):
     expected_goals_home: Optional[float]
     expected_goals_away: Optional[float]
     value_bets: list[str]
+    goal_probs: dict[str, float]
 
 
 class FixturePrediction(BaseModel):
@@ -413,10 +408,6 @@ def _run_retrain() -> None:
                 base_models.append(m)
                 _retrain_log(f"[{league_cfg.name}] ✓ {model_name} hotovo", "success")
 
-            if len(base_models) >= 2:
-                _models[league_key]["ensemble"] = EnsemblePredictor(base_models)
-                _retrain_log(f"[{league_cfg.name}] ✓ Ensemble sestaven", "success")
-
         _retrain_log("Přetrénování dokončeno ✓", "success")
 
     except Exception as e:
@@ -494,6 +485,7 @@ def predictions(league: str, db: Session = Depends(get_db)):
                 xg_home=pred.expected_goals_home,
                 xg_away=pred.expected_goals_away,
                 value_bets=pred.value_bets or [],
+                goal_probs=pred.goal_probs or {},
                 predicted_outcome=po,
                 odds_home=bet365.home_win if bet365 else None,
                 odds_draw=bet365.draw if bet365 else None,
@@ -510,6 +502,7 @@ def predictions(league: str, db: Session = Depends(get_db)):
                 expected_goals_home=pred.expected_goals_home,
                 expected_goals_away=pred.expected_goals_away,
                 value_bets=pred.value_bets,
+                goal_probs=pred.goal_probs,
             ))
 
         results.append(FixturePrediction(
@@ -669,8 +662,6 @@ def calibration(league: str):
     results = []
 
     for model_name, model in league_models.items():
-        if model_name == "ensemble":
-            continue
         bt_engine = BacktestEngine(model, min_train_size=100, retrain_every=10)
         bt = bt_engine.run(history, league_name=league_cfg.name)
         cal = compute_calibration(bt.matches, model_name)
@@ -701,8 +692,6 @@ def track_record(league: str, db: Session = Depends(get_db)):
     results = []
 
     for model_name, model in league_models.items():
-        if model_name == "ensemble":
-            continue  # ensemble backtesting not supported (requires sub-models trained separately)
         engine_bt = BacktestEngine(model, min_train_size=100, retrain_every=10)
         bt = engine_bt.run(history, league_name=league_cfg.name)
 

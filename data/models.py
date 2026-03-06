@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 
 
@@ -63,3 +63,4 @@ class Prediction:
     value_bets: List[str] = field(default_factory=list)
     expected_goals_home: Optional[float] = None
     expected_goals_away: Optional[float] = None
+    goal_probs: Dict[str, float] = field(default_factory=dict)
