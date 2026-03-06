@@ -16,10 +16,13 @@ class FootballFetcher:
             # Fetch all training seasons for richer history
             all_fixtures = []
             for season in league.seasons:
+                # Current season: cache 1h (new matches finish regularly)
+                # Past seasons: cache forever (complete, never change)
+                ttl = self.ttl.fixtures if season == league.season else self.ttl.historical
                 data = self.client.get(
                     "fixtures",
                     {"league": league.id, "season": season, "status": status},
-                    ttl=self.ttl.historical,
+                    ttl=ttl,
                 )
                 if data:
                     all_fixtures.extend(self._parse_fixture(f) for f in data.get("response", []))
@@ -34,10 +37,12 @@ class FootballFetcher:
 
     def get_fixtures_season(self, league: LeagueConfig, season: int, status: str = "FT") -> List[Fixture]:
         """Fetch fixtures for a single specific season (used for resolve)."""
+        is_current = season == league.season
+        ttl = (self.ttl.fixtures if is_current else self.ttl.historical) if status == "FT" else self.ttl.fixtures
         data = self.client.get(
             "fixtures",
             {"league": league.id, "season": season, "status": status},
-            ttl=self.ttl.historical if status == "FT" else self.ttl.fixtures,
+            ttl=ttl,
         )
         return [self._parse_fixture(f) for f in data.get("response", [])] if data else []
 
