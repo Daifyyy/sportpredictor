@@ -9,7 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -88,7 +88,7 @@ def _scheduled_predictions():
             upcoming = _fetcher.get_upcoming_fixtures(league_cfg, next_n=10)
             for fixture in upcoming:
                 odds_list = _fetcher.get_odds(fixture.id)
-                bet365 = odds_list[0] if odds_list else None
+                bet365 = next((o for o in odds_list if "bet365" in o.bookmaker.lower()), None)
                 for model_name, model in league_models.items():
                     pred = model.predict(fixture)
                     pred = _detector.detect(pred, odds_list)
@@ -460,7 +460,7 @@ def predictions(league: str, db: Session = Depends(get_db)):
 
     for fixture in upcoming:
         odds_list = _fetcher.get_odds(fixture.id)
-        bet365 = odds_list[0] if odds_list else None
+        bet365 = next((o for o in odds_list if "bet365" in o.bookmaker.lower()), None)
         model_preds = []
 
         for model_name, model in league_models.items():
@@ -833,7 +833,8 @@ def bankroll_update(league: str, db: Session = Depends(get_db)):
         .filter(
             PredictionRow.league_key == league,
             PredictionRow.actual_outcome.isnot(None),
-            PredictionRow.value_bets != [],
+            PredictionRow.value_bets.isnot(None),
+            func.cardinality(PredictionRow.value_bets) > 0,
         )
         .order_by(PredictionRow.match_date)
         .all()
