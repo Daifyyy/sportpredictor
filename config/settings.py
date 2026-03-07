@@ -39,10 +39,11 @@ class Settings:
     requests_per_minute: int = 300
     cache_ttl: CacheTTL = field(default_factory=CacheTTL)
 
-    # Bookmakers used for value bet detection (first = primary for odds display)
+    # Bookmakers used for value bet detection
+    # Pinnacle = sharp reference (lowest margin = most accurate market probabilities)
     bookmakers: Dict[str, BookmakerConfig] = field(default_factory=lambda: {
-        "bet365":   BookmakerConfig(11,  "Bet365"),
-        "pinnacle": BookmakerConfig(23,  "Pinnacle"),
+        "pinnacle": BookmakerConfig(23, "Pinnacle"),
+        # "bet365":   BookmakerConfig(1,   "Bet365"),   # ID 1, not 11 (11 = 1xBet)
         # "bwin":     BookmakerConfig(6,   "Bwin"),
         # "williamhill": BookmakerConfig(8, "William Hill"),
         # "unibet":   BookmakerConfig(16,  "Unibet"),

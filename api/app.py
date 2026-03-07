@@ -88,7 +88,7 @@ def _scheduled_predictions():
             upcoming = _fetcher.get_upcoming_fixtures(league_cfg, next_n=10)
             for fixture in upcoming:
                 odds_list = _fetcher.get_odds(fixture.id)
-                bet365 = next((o for o in odds_list if "bet365" in o.bookmaker.lower()), None)
+                pinnacle = next((o for o in odds_list if "pinnacle" in o.bookmaker.lower()), None)
                 for model_name, model in league_models.items():
                     pred = model.predict(fixture)
                     pred = _detector.detect(pred, odds_list)
@@ -108,10 +108,25 @@ def _scheduled_predictions():
                         value_bets=pred.value_bets or [],
                         goal_probs=pred.goal_probs or {},
                         predicted_outcome=po,
-                        odds_home=bet365.home_win if bet365 else None,
-                        odds_draw=bet365.draw if bet365 else None,
-                        odds_away=bet365.away_win if bet365 else None,
-                    ).on_conflict_do_nothing(constraint="uq_prediction_fixture_model")
+                        odds_home=pinnacle.home_win if pinnacle else None,
+                        odds_draw=pinnacle.draw if pinnacle else None,
+                        odds_away=pinnacle.away_win if pinnacle else None,
+                    ).on_conflict_do_update(
+                        constraint="uq_prediction_fixture_model",
+                        set_={
+                            "prob_home": pred.prob_home,
+                            "prob_draw": pred.prob_draw,
+                            "prob_away": pred.prob_away,
+                            "xg_home": pred.expected_goals_home,
+                            "xg_away": pred.expected_goals_away,
+                            "value_bets": pred.value_bets or [],
+                            "goal_probs": pred.goal_probs or {},
+                            "predicted_outcome": po,
+                            "odds_home": pinnacle.home_win if pinnacle else None,
+                            "odds_draw": pinnacle.draw if pinnacle else None,
+                            "odds_away": pinnacle.away_win if pinnacle else None,
+                        }
+                    )
                     db.execute(stmt)
             db.commit()
             logger.info(f"Scheduler: predictions saved for {league_key} ({len(upcoming)} fixtures)")
@@ -455,12 +470,20 @@ def predictions(league: str, db: Session = Depends(get_db)):
     league_models = _require_models(league)
     league_cfg = settings.leagues[league]
 
+    # Wipe all unresolved predictions for this league before re-predicting.
+    # Resolved rows (actual_outcome IS NOT NULL) are kept for performance tracking.
+    db.query(PredictionRow).filter(
+        PredictionRow.league_key == league,
+        PredictionRow.actual_outcome.is_(None),
+    ).delete(synchronize_session=False)
+    db.flush()
+
     upcoming = _fetcher.get_upcoming_fixtures(league_cfg, next_n=10)
     results = []
 
     for fixture in upcoming:
         odds_list = _fetcher.get_odds(fixture.id)
-        bet365 = next((o for o in odds_list if "bet365" in o.bookmaker.lower()), None)
+        pinnacle = next((o for o in odds_list if "pinnacle" in o.bookmaker.lower()), None)
         model_preds = []
 
         for model_name, model in league_models.items():
@@ -487,9 +510,9 @@ def predictions(league: str, db: Session = Depends(get_db)):
                 value_bets=pred.value_bets or [],
                 goal_probs=pred.goal_probs or {},
                 predicted_outcome=po,
-                odds_home=bet365.home_win if bet365 else None,
-                odds_draw=bet365.draw if bet365 else None,
-                odds_away=bet365.away_win if bet365 else None,
+                odds_home=pinnacle.home_win if pinnacle else None,
+                odds_draw=pinnacle.draw if pinnacle else None,
+                odds_away=pinnacle.away_win if pinnacle else None,
             ).on_conflict_do_nothing(constraint="uq_prediction_fixture_model")
             db.execute(stmt)
 
@@ -782,11 +805,11 @@ def kelly(league: str, db: Session = Depends(get_db)):
 
     for fixture in upcoming:
         odds_list = _fetcher.get_odds(fixture.id)
-        bet365 = next((o for o in odds_list if o.bookmaker == "Bet365"), None)
-        if not bet365:
+        pinnacle = next((o for o in odds_list if "pinnacle" in o.bookmaker.lower()), None)
+        if not pinnacle:
             continue
 
-        odds_map = {"H": bet365.home_win, "D": bet365.draw, "A": bet365.away_win}
+        odds_map = {"H": pinnacle.home_win, "D": pinnacle.draw, "A": pinnacle.away_win}
 
         for model_name, model in league_models.items():
             pred = model.predict(fixture)

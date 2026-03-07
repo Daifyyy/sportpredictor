@@ -25,12 +25,8 @@ class ValueBetDetector:
             prediction.value_bets = []
             return prediction
 
-        # Bet365 pro zobrazení kurzu (kde fyzicky sázíme)
-        bet365 = self._find_bookmaker(odds, "bet365")
-        display = bet365 or pinnacle
-
         pinnacle_implied = pinnacle.implied_probs()
-        display_odds_map = {"H": display.home_win, "D": display.draw, "A": display.away_win}
+        pinnacle_odds_map = {"H": pinnacle.home_win, "D": pinnacle.draw, "A": pinnacle.away_win}
 
         checks = [
             ("H", prediction.prob_home),
@@ -42,14 +38,14 @@ class ValueBetDetector:
         for outcome, model_prob in checks:
             if model_prob < self.min_prob:
                 continue
-            decimal_odd = display_odds_map[outcome]
+            decimal_odd = pinnacle_odds_map[outcome]
             if decimal_odd > self.max_odds:
                 continue
             edge = model_prob - pinnacle_implied[outcome]
             if edge >= self.min_edge:
                 ev = model_prob * decimal_odd - 1
                 value_bets.append(
-                    f"{outcome} @ {decimal_odd} ({display.bookmaker}) | edge={edge:.1%} | EV={ev:.1%} [vs Pinnacle]"
+                    f"{outcome} @ {decimal_odd} | edge={edge:.1%} | EV={ev:.1%} (Pinnacle)"
                 )
 
         prediction.value_bets = value_bets

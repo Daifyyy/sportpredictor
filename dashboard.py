@@ -85,9 +85,13 @@ if st.sidebar.button("🧠 Přetrénovat modely", type="primary", **_btn):
         st.sidebar.error(r.text)
 
 if st.sidebar.button("🔄 Načíst predikce", **_btn):
+    st.session_state["show_retrain_log"] = False
     with st.spinner("Načítám..."):
         r = requests.get(f"{API}/predictions/{league}", timeout=60)
-        st.sidebar.success(f"{len(r.json())} zápasů") if r.ok else st.sidebar.error(r.text)
+        if r.ok:
+            st.sidebar.success(f"{len(r.json())} zápasů")
+        else:
+            st.sidebar.error(r.text)
         st.cache_data.clear()
 
 if st.sidebar.button("✅ Resolve výsledků", **_btn):
@@ -166,6 +170,20 @@ def model_label(name: str) -> str:
     return name.replace("_", " ").title()
 
 
+_VB_OUTCOME = {"H": "Dom", "D": "Rem", "A": "Host"}
+
+def short_vb(vb: str) -> str:
+    """'A @ 4.36 (1xBet) | edge=21.4% | EV=91.9% [vs Pinnacle]' → 'Host @ 4.36 (+21.4%)'"""
+    try:
+        outcome = vb[0]
+        odds_str = vb.split("@")[1].split("|")[0].split("(")[0].strip()
+        edge_str = next((p.replace("edge=", "").strip() for p in vb.split("|") if "edge=" in p), "")
+        label = _VB_OUTCOME.get(outcome, outcome)
+        return f"{label} @ {odds_str} (+{edge_str})" if edge_str else f"{label} @ {odds_str}"
+    except Exception:
+        return vb
+
+
 @st.cache_data(ttl=300)
 def load_predictions(league_key: str):
     with get_db() as db:
@@ -202,31 +220,78 @@ with tab_pred:
         st.info("Žádné nadcházející predikce. Klikni 'Načíst predikce'.")
     else:
         def render_fixture_table(subset):
+            MIN_EDGE = 0.03
             by_fixture: dict[int, list] = {}
             for r in subset:
                 by_fixture.setdefault(r.fixture_id, []).append(r)
+
             pivot_rows = []
+            prob_cols: list[str] = []
+            edge_cols: list[str] = []
+            goal_cols: list[str] = []
+
             for fixture_id, preds in sorted(by_fixture.items(), key=lambda x: x[1][0].match_date):
                 p0 = preds[0]
-                row = {"Datum": p0.match_date.strftime("%d.%m %H:%M"), "Domácí": p0.home_team, "Hosté": p0.away_team}
+                row: dict = {
+                    "Datum": p0.match_date.strftime("%d.%m %H:%M"),
+                    "Domácí": p0.home_team,
+                    "Hosté": p0.away_team,
+                }
                 vb_all = []
                 for p in preds:
                     ml = model_label(p.model_name)
                     row[f"{ml} tip"] = p.predicted_outcome or "—"
-                    row[f"{ml} P(H)"] = f"{p.prob_home:.0%}"
-                    row[f"{ml} P(D)"] = f"{p.prob_draw:.0%}"
-                    row[f"{ml} P(A)"] = f"{p.prob_away:.0%}"
+                    for outcome, prob, odds_val in [
+                        ("H", p.prob_home, p.odds_home),
+                        ("D", p.prob_draw, p.odds_draw),
+                        ("A", p.prob_away, p.odds_away),
+                    ]:
+                        pcol = f"{ml} P({outcome})"
+                        ecol = f"{ml} E({outcome})"
+                        row[pcol] = prob
+                        if pcol not in prob_cols:
+                            prob_cols.append(pcol)
+                        if odds_val and odds_val > 1:
+                            row[ecol] = prob - 1 / odds_val
+                        else:
+                            row[ecol] = float("nan")
+                        if ecol not in edge_cols:
+                            edge_cols.append(ecol)
                     gp = p.goal_probs or {}
                     if gp:
-                        row[f"{ml} u2.5"] = f"{gp.get('u2.5', 0):.0%}"
-                        row[f"{ml} o2.5"] = f"{gp.get('o2.5', 0):.0%}"
-                        row[f"{ml} 1-3g"] = f"{gp.get('1-3', 0):.0%}"
-                        row[f"{ml} 2-4g"] = f"{gp.get('2-4', 0):.0%}"
+                        for gkey, glabel in [("u2.5", "u2.5"), ("o2.5", "o2.5"), ("1-3", "1-3g"), ("2-4", "2-4g")]:
+                            gcol = f"{ml} {glabel}"
+                            row[gcol] = gp.get(gkey, 0)
+                            if gcol not in goal_cols:
+                                goal_cols.append(gcol)
                     vb_all.extend(p.value_bets or [])
                 if vb_all:
-                    row["💰"] = ", ".join(sorted(set(vb_all)))
+                    row["💰"] = ", ".join(short_vb(v) for v in sorted(set(vb_all)))
                 pivot_rows.append(row)
-            st.dataframe(pd.DataFrame(pivot_rows), use_container_width=True, hide_index=True)
+
+            df = pd.DataFrame(pivot_rows)
+
+            fmt: dict = {}
+            for col in prob_cols + goal_cols:
+                if col in df.columns:
+                    fmt[col] = "{:.0%}"
+            for col in edge_cols:
+                if col in df.columns:
+                    fmt[col] = lambda x: f"{x:+.1%}" if (isinstance(x, float) and not pd.isna(x)) else "—"
+
+            def _edge_bg(val):
+                if pd.isna(val):
+                    return ""
+                if val >= MIN_EDGE:
+                    return "background-color: #c6efce; color: #276221"
+                if val >= 0:
+                    return "background-color: #ffeb9c; color: #9c5700"
+                return "background-color: #f2f2f2; color: #888"
+
+            valid_edge = [c for c in edge_cols if c in df.columns]
+            styled = df.style.format(fmt, na_rep="—").map(_edge_bg, subset=valid_edge)
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+            st.caption("E(H/D/A) = edge modelu nad Pinnacle: 🟢 ≥3% value bet | 🟡 0–3% blízko | šedá = žádná výhoda")
 
         if live:
             st.markdown("🔴 **Právě hraje / čeká na výsledek**")
@@ -257,6 +322,7 @@ with tab_pred:
         if vb_rows:
             st.subheader("💰 Value bety")
             st.dataframe(pd.DataFrame(vb_rows), use_container_width=True, hide_index=True)
+            st.caption("Legenda: Dom/Rem/Host = výsledek | @ kurz = kurz u bukmakera | +edge% = naše výhoda nad Pinnacle tržní pravděpodobností")
 
 
 # ── TAB 2: Výkonnost ──────────────────────────────────────────────────────────
