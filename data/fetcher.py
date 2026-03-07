@@ -55,17 +55,9 @@ class FootballFetcher:
         return [self._parse_fixture(f) for f in data.get("response", [])] if data else []
 
     def get_odds(self, fixture_id: int) -> List[Odds]:
-        """Fetch odds from all configured bookmakers."""
-        all_odds = []
-        for bm in self.settings.bookmakers.values():
-            data = self.client.get(
-                "odds",
-                {"fixture": fixture_id, "bookmaker": bm.id},
-                ttl=self.ttl.odds,
-            )
-            if data:
-                all_odds.extend(self._parse_odds(fixture_id, data))
-        return all_odds
+        """Fetch all available bookmaker odds for a fixture in a single API call."""
+        data = self.client.get("odds", {"fixture": fixture_id}, ttl=self.ttl.odds)
+        return self._parse_odds(fixture_id, data) if data else []
 
     def _parse_fixture(self, raw: dict) -> Fixture:
         f = raw["fixture"]

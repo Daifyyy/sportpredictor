@@ -1,32 +1,29 @@
 from typing import List, Optional
 from data.models import Prediction, Odds
 
+# Bookmakers ordered from sharpest to softest margin.
+# The first one found in the available odds list is used as reference.
+_SHARP_PRIORITY = ["pinnacle", "betfair", "sbobet", "marathonbet", "1xbet", "bet365", "bwin", "unibet"]
+
 
 class ValueBetDetector:
     def __init__(self, min_edge: float = 0.03, min_prob: float = 0.60, max_odds: float = 2.7):
-        """
-        min_edge = minimální edge nad Pinnacle implied probability (3 %).
-        min_prob = minimální pravděpodobnost modelu — sázíme jen na výsledky s 60%+ jistotou.
-        max_odds = maximální kurz pro sázení — nic nad 2.7 (favorité, ne long-shoty).
-        Pinnacle slouží jako sharp reference (nejnižší margin = nejpřesnější tržní prob).
-        Sázecí kurzy jsou brány z Bet365 (pokud dostupné), jinak z Pinnacle.
-        """
         self.min_edge = min_edge
         self.min_prob = min_prob
         self.max_odds = max_odds
 
     def detect(self, prediction: Prediction, odds: List[Odds]) -> Prediction:
         if not odds:
-            return prediction
-
-        pinnacle = self._find_bookmaker(odds, "pinnacle")
-        if not pinnacle:
-            # Bez Pinnacle nelze spolehlivě detekovat value — přeskočíme
             prediction.value_bets = []
             return prediction
 
-        pinnacle_implied = pinnacle.implied_probs()
-        pinnacle_odds_map = {"H": pinnacle.home_win, "D": pinnacle.draw, "A": pinnacle.away_win}
+        reference = self._find_sharpest(odds)
+        if not reference:
+            prediction.value_bets = []
+            return prediction
+
+        ref_implied = reference.implied_probs()
+        ref_odds_map = {"H": reference.home_win, "D": reference.draw, "A": reference.away_win}
 
         checks = [
             ("H", prediction.prob_home),
@@ -38,18 +35,27 @@ class ValueBetDetector:
         for outcome, model_prob in checks:
             if model_prob < self.min_prob:
                 continue
-            decimal_odd = pinnacle_odds_map[outcome]
+            decimal_odd = ref_odds_map[outcome]
             if decimal_odd > self.max_odds:
                 continue
-            edge = model_prob - pinnacle_implied[outcome]
+            edge = model_prob - ref_implied[outcome]
             if edge >= self.min_edge:
                 ev = model_prob * decimal_odd - 1
                 value_bets.append(
-                    f"{outcome} @ {decimal_odd} | edge={edge:.1%} | EV={ev:.1%} (Pinnacle)"
+                    f"{outcome} @ {decimal_odd} | edge={edge:.1%} | EV={ev:.1%} ({reference.bookmaker})"
                 )
 
         prediction.value_bets = value_bets
         return prediction
+
+    @classmethod
+    def _find_sharpest(cls, odds: List[Odds]) -> Optional[Odds]:
+        """Return the sharpest available bookmaker by priority list."""
+        for name in _SHARP_PRIORITY:
+            found = cls._find_bookmaker(odds, name)
+            if found:
+                return found
+        return odds[0] if odds else None
 
     @staticmethod
     def _find_bookmaker(odds: List[Odds], name: str) -> Optional[Odds]:

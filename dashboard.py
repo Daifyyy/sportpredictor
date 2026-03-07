@@ -277,21 +277,21 @@ with tab_pred:
                     fmt[col] = "{:.0%}"
             for col in edge_cols:
                 if col in df.columns:
-                    fmt[col] = lambda x: f"{x:+.1%}" if (isinstance(x, float) and not pd.isna(x)) else "—"
+                    fmt[col] = lambda x: f"{x:+.1%}" if (isinstance(x, float) and not pd.isna(x)) else "N/A"
 
             def _edge_bg(val):
                 if pd.isna(val):
-                    return ""
+                    return "background-color: #fce8cc; color: #a05000"  # oranžová = kurzy chybí
                 if val >= MIN_EDGE:
-                    return "background-color: #c6efce; color: #276221"
+                    return "background-color: #c6efce; color: #276221"  # zelená = value bet
                 if val >= 0:
-                    return "background-color: #ffeb9c; color: #9c5700"
-                return "background-color: #f2f2f2; color: #888"
+                    return "background-color: #ffeb9c; color: #9c5700"  # žlutá = blízko
+                return "background-color: #f2f2f2; color: #888"          # šedá = pod trhem
 
             valid_edge = [c for c in edge_cols if c in df.columns]
             styled = df.style.format(fmt, na_rep="—").map(_edge_bg, subset=valid_edge)
             st.dataframe(styled, use_container_width=True, hide_index=True)
-            st.caption("E(H/D/A) = edge modelu nad Pinnacle: 🟢 ≥3% value bet | 🟡 0–3% blízko | šedá = žádná výhoda")
+            st.caption("E(H/D/A) = edge modelu nad trhem (margin-adjusted): 🟢 ≥3% value bet | 🟡 0–3% blízko | šedá = pod trhem | 🟠 N/A = kurzy nedostupné")
 
         if live:
             st.markdown("🔴 **Právě hraje / čeká na výsledek**")
