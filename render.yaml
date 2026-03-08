@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: football-predictor-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-render.txt
+    startCommand: uvicorn api.app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: API_FOOTBALL_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false

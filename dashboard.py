@@ -1,11 +1,12 @@
 """
 Football Predictor — Streamlit Dashboard
 Reads directly from Supabase. No local API needed for display.
-Actions (retrain, resolve) require local API: uvicorn api.app:app --reload
+Actions (retrain, resolve) require the API (local or Render).
 
 Deploy: Streamlit Community Cloud
-Secrets needed: DATABASE_URL
+Secrets needed: DATABASE_URL, API_URL
 """
+import os
 from datetime import datetime
 
 import pandas as pd
@@ -14,11 +15,16 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+# Inject Streamlit secrets into env (for Streamlit Community Cloud)
+for _k in ["DATABASE_URL", "API_URL", "API_FOOTBALL_KEY"]:
+    if _k in st.secrets and not os.getenv(_k):
+        os.environ[_k] = st.secrets[_k]
+
+API = os.getenv("API_URL", "http://127.0.0.1:8000").rstrip("/")
+
 from config.settings import settings
 from db.models import BacktestRunRow, BankrollRow, PredictionRow
 from db.session import engine
-
-API = "http://127.0.0.1:8000"
 
 st.set_page_config(page_title="Football Predictor", page_icon="⚽", layout="wide")
 st.title("⚽ Football Predictor Dashboard")
@@ -35,12 +41,16 @@ def get_db() -> SASession:
 # ── API availability check ────────────────────────────────────────────────────
 
 @st.cache_data(ttl=10)
-def api_alive() -> bool:
+def api_health() -> dict:
     try:
-        requests.get(f"{API}/config/leagues", timeout=2)
-        return True
+        r = requests.get(f"{API}/health", timeout=5)
+        return r.json() if r.ok else {}
     except Exception:
-        return False
+        return {}
+
+
+def api_alive() -> bool:
+    return api_health().get("status") == "ok"
 
 
 # ── Config from settings ──────────────────────────────────────────────────────
@@ -68,9 +78,15 @@ if st.session_state.get("last_league") != league:
 st.sidebar.divider()
 st.sidebar.subheader("Akce")
 
-local_api = api_alive()
+health = api_health()
+local_api = health.get("status") == "ok"
 if not local_api:
-    st.sidebar.info("💡 Akce vyžadují lokální API:\n`uvicorn api.app:app --reload`")
+    st.sidebar.info(f"💡 Akce vyžadují API.\nAktuální URL: `{API}`")
+elif health.get("retraining"):
+    st.sidebar.info("🔄 Probíhá přetrénování modelů...")
+    st.session_state["show_retrain_log"] = True
+elif health.get("models_loaded", 0) == 0:
+    st.sidebar.warning("⚠️ Žádné modely nejsou načteny. Klikni 'Přetrénovat modely'.")
 
 _btn = dict(use_container_width=True, disabled=not local_api)
 
@@ -127,11 +143,51 @@ if st.sidebar.button("💹 Update bankroll", **_btn):
             st.sidebar.error(r.text)
 
 st.sidebar.divider()
-st.sidebar.caption("🕘 Auto: predikce 09:00, resolve 23:00 (jen lokálně)")
+st.sidebar.subheader("Hromadné akce")
+
+if st.sidebar.button("🌍 Načíst všechny ligy", use_container_width=True, disabled=not local_api):
+    all_leagues = list(settings.leagues.keys())
+    results = []
+    progress = st.sidebar.progress(0, text="Načítám ligy...")
+    for i, lg in enumerate(all_leagues):
+        progress.progress((i + 1) / len(all_leagues), text=f"Načítám {leagues_display[lg]}...")
+        try:
+            r = requests.get(f"{API}/predictions/{lg}", timeout=60)
+            if r.ok:
+                results.append(f"✅ {leagues_display[lg]}: {len(r.json())} zápasů")
+            else:
+                results.append(f"❌ {leagues_display[lg]}: {r.text[:60]}")
+        except Exception as e:
+            results.append(f"❌ {leagues_display[lg]}: {e}")
+    progress.empty()
+    st.sidebar.success("\n\n".join(results))
+    st.cache_data.clear()
+
+if st.sidebar.button("✅ Resolve všech lig", use_container_width=True, disabled=not local_api):
+    all_leagues = list(settings.leagues.keys())
+    results = []
+    progress = st.sidebar.progress(0, text="Resolvuji ligy...")
+    for i, lg in enumerate(all_leagues):
+        progress.progress((i + 1) / len(all_leagues), text=f"Resolvuji {leagues_display[lg]}...")
+        try:
+            r = requests.post(f"{API}/resolve/{lg}", timeout=60)
+            if r.ok:
+                d = r.json()
+                results.append(f"✅ {leagues_display[lg]}: +{d['resolved']} nových")
+            else:
+                results.append(f"❌ {leagues_display[lg]}: {r.text[:60]}")
+        except Exception as e:
+            results.append(f"❌ {leagues_display[lg]}: {e}")
+    progress.empty()
+    st.sidebar.success("\n\n".join(results))
+    st.cache_data.clear()
+
+st.sidebar.divider()
 if local_api:
-    st.sidebar.caption("🟢 Lokální API aktivní")
+    leagues_ready = health.get("leagues_ready", [])
+    st.sidebar.caption(f"🟢 API aktivní | {health.get('models_loaded', 0)}/5 lig načteno")
 else:
-    st.sidebar.caption("🔴 Lokální API offline")
+    st.sidebar.caption(f"🔴 API offline ({API})")
 
 # ── Live retrain log ──────────────────────────────────────────────────────────
 

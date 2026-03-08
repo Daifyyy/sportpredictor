@@ -5,8 +5,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, text
@@ -76,98 +74,6 @@ def _kelly_stake(prob: float, odds: float) -> float:
     return max(0.0, kelly * KELLY_FRACTION)  # fractional Kelly, never negative
 
 
-def _scheduled_predictions():
-    """Run every morning: fetch upcoming fixtures and save predictions to DB."""
-    db = SessionLocal()
-    try:
-        for league_key, league_cfg in settings.leagues.items():
-            league_models = _models.get(league_key, {})
-            if not league_models:
-                logger.warning(f"Scheduler: no models for {league_key}, skipping")
-                continue
-            upcoming = _fetcher.get_upcoming_fixtures(league_cfg, next_n=10)
-            for fixture in upcoming:
-                odds_list = _fetcher.get_odds(fixture.id)
-                pinnacle = _detector._find_sharpest(odds_list)
-                for model_name, model in league_models.items():
-                    pred = model.predict(fixture)
-                    pred = _detector.detect(pred, odds_list)
-                    po = _predicted_outcome(pred.prob_home, pred.prob_draw, pred.prob_away)
-                    stmt = pg_insert(PredictionRow).values(
-                        fixture_id=fixture.id,
-                        league_key=league_key,
-                        model_name=model_name,
-                        match_date=fixture.date,
-                        home_team=fixture.home_team.name,
-                        away_team=fixture.away_team.name,
-                        prob_home=pred.prob_home,
-                        prob_draw=pred.prob_draw,
-                        prob_away=pred.prob_away,
-                        xg_home=pred.expected_goals_home,
-                        xg_away=pred.expected_goals_away,
-                        value_bets=pred.value_bets or [],
-                        goal_probs=pred.goal_probs or {},
-                        predicted_outcome=po,
-                        odds_home=pinnacle.home_win if pinnacle else None,
-                        odds_draw=pinnacle.draw if pinnacle else None,
-                        odds_away=pinnacle.away_win if pinnacle else None,
-                    ).on_conflict_do_update(
-                        constraint="uq_prediction_fixture_model",
-                        set_={
-                            "prob_home": pred.prob_home,
-                            "prob_draw": pred.prob_draw,
-                            "prob_away": pred.prob_away,
-                            "xg_home": pred.expected_goals_home,
-                            "xg_away": pred.expected_goals_away,
-                            "value_bets": pred.value_bets or [],
-                            "goal_probs": pred.goal_probs or {},
-                            "predicted_outcome": po,
-                            "odds_home": pinnacle.home_win if pinnacle else None,
-                            "odds_draw": pinnacle.draw if pinnacle else None,
-                            "odds_away": pinnacle.away_win if pinnacle else None,
-                        }
-                    )
-                    db.execute(stmt)
-            db.commit()
-            logger.info(f"Scheduler: predictions saved for {league_key} ({len(upcoming)} fixtures)")
-    except Exception as e:
-        logger.error(f"Scheduler predictions failed: {e}")
-        db.rollback()
-    finally:
-        db.close()
-
-
-def _scheduled_resolve():
-    """Run every evening: fill actual_outcome for finished matches."""
-    db = SessionLocal()
-    try:
-        total_resolved = 0
-        for league_key, league_cfg in settings.leagues.items():
-            finished = _fetcher.get_fixtures_season(league_cfg, league_cfg.season, status="FT")
-            finished_by_id = {f.id: f for f in finished if f.result is not None}
-            pending = (
-                db.query(PredictionRow)
-                .filter(
-                    PredictionRow.league_key == league_key,
-                    PredictionRow.actual_outcome.is_(None),
-                    PredictionRow.fixture_id.in_(finished_by_id.keys()),
-                )
-                .all()
-            )
-            for row in pending:
-                actual = finished_by_id[row.fixture_id].result.outcome
-                row.actual_outcome = actual
-                row.correct = row.predicted_outcome == actual
-                total_resolved += 1
-        db.commit()
-        logger.info(f"Scheduler: resolved {total_resolved} predictions")
-    except Exception as e:
-        logger.error(f"Scheduler resolve failed: {e}")
-        db.rollback()
-    finally:
-        db.close()
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _fetcher
@@ -175,22 +81,23 @@ async def lifespan(app: FastAPI):
     _fetcher = FootballFetcher(client, settings)
 
     Base.metadata.create_all(engine)
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+    any_model_loaded = False
     for league_key in settings.leagues:
         _models[league_key] = {}
-        base_models = []
         for model_name, cls in MODEL_CLASSES.items():
             path = MODELS_DIR / f"{model_name}_{league_key}.joblib"
             if path.exists():
                 try:
                     m = cls.load(path)
                     _models[league_key][model_name] = m
-                    base_models.append(m)
+                    any_model_loaded = True
                     logger.info(f"Loaded {model_name} for {league_key}")
                 except Exception as e:
                     logger.warning(f"Failed to load {path}: {e}")
             else:
-                logger.warning(f"Model not found: {path} — run main.py first")
+                logger.warning(f"Model not found: {path}")
 
         _calibrators[league_key] = {}
         for model_name in MODEL_CLASSES.keys():
@@ -202,17 +109,11 @@ async def lifespan(app: FastAPI):
                 except Exception as e:
                     logger.warning(f"Failed to load calibrator {cal_path}: {e}")
 
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(_scheduled_predictions, CronTrigger(hour=9, minute=0),
-                      name="daily_predictions", misfire_grace_time=3600)
-    scheduler.add_job(_scheduled_resolve, CronTrigger(hour=23, minute=0),
-                      name="daily_resolve", misfire_grace_time=3600)
-    scheduler.start()
-    logger.info("Scheduler started — predictions @ 09:00, resolve @ 23:00")
+    if not any_model_loaded:
+        logger.info("No trained models found — starting auto-retrain in background")
+        threading.Thread(target=_run_retrain, daemon=True).start()
 
     yield
-
-    scheduler.shutdown()
 
 
 app = FastAPI(title="Football Predictor API", lifespan=lifespan)
@@ -446,6 +347,18 @@ def retrain():
 @app.get("/retrain/status")
 def retrain_status():
     return _retrain_status
+
+
+@app.get("/health")
+def health():
+    """Quick status — which leagues have models loaded, whether retrain is running."""
+    loaded = {lg: list(m.keys()) for lg, m in _models.items() if m}
+    return {
+        "status": "ok",
+        "models_loaded": len(loaded),
+        "leagues_ready": list(loaded.keys()),
+        "retraining": _retrain_status["running"],
+    }
 
 
 @app.get("/config/leagues")
