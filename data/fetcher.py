@@ -1,5 +1,5 @@
 from typing import List
-from datetime import datetime
+from datetime import datetime, timezone
 from api.client import APIClient
 from config.settings import Settings, LeagueConfig
 from data.models import Fixture, Team, MatchResult, Odds
@@ -47,12 +47,30 @@ class FootballFetcher:
         return [self._parse_fixture(f) for f in data.get("response", [])] if data else []
 
     def get_upcoming_fixtures(self, league: LeagueConfig, next_n: int = 10) -> List[Fixture]:
+        # Primary: use 'next' parameter
         data = self.client.get(
             "fixtures",
             {"league": league.id, "season": league.season, "next": next_n},
-            ttl=self.ttl.fixtures
+            ttl=self.ttl.fixtures,
         )
-        return [self._parse_fixture(f) for f in data.get("response", [])] if data else []
+        fixtures = [self._parse_fixture(f) for f in data.get("response", [])] if data else []
+
+        # Fallback: status=NS filtered to future dates (useful for cup competitions
+        # where knockout fixtures may not appear in 'next' until confirmed)
+        if not fixtures:
+            data = self.client.get(
+                "fixtures",
+                {"league": league.id, "season": league.season, "status": "NS"},
+                ttl=self.ttl.fixtures,
+            )
+            now = datetime.now(timezone.utc)
+            all_ns = [self._parse_fixture(f) for f in data.get("response", [])] if data else []
+            fixtures = sorted(
+                [f for f in all_ns if f.date > now],
+                key=lambda x: x.date,
+            )[:next_n]
+
+        return fixtures
 
     def get_odds(self, fixture_id: int) -> List[Odds]:
         """Fetch all available bookmaker odds for a fixture in a single API call."""
