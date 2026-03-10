@@ -15,6 +15,8 @@ class FixturePrediction(Base):
     league = Column(String, nullable=False)
     home_team = Column(String, nullable=False)
     away_team = Column(String, nullable=False)
+    home_logo = Column(String, nullable=True)
+    away_logo = Column(String, nullable=True)
     match_date = Column(DateTime(timezone=True), nullable=False)
     prob_home = Column(Float, nullable=False)
     prob_draw = Column(Float, nullable=False)

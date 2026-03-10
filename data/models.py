@@ -8,6 +8,7 @@ class Team:
     id: int
     name: str
     country: str
+    logo: str = ""
 
 
 @dataclass

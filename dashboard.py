@@ -260,6 +260,8 @@ with tab_pred:
                 "date": r.match_date.isoformat(),
                 "home_team": r.home_team,
                 "away_team": r.away_team,
+                "home_logo": r.home_logo or "",
+                "away_logo": r.away_logo or "",
                 "prob_home": r.prob_home,
                 "prob_draw": r.prob_draw,
                 "prob_away": r.prob_away,
@@ -311,7 +313,9 @@ with tab_pred:
         prob_cols = ["P(H)%", "P(D)%", "P(A)%", "P(O2.5)%", "P(U2.5)%", "P(BTTS)%", "P(1-3g)%", "P(2-4g)%"]
         df = pd.DataFrame([{
             "Datum": f["date"][:16].replace("T", " "),
+            "": f.get("home_logo", ""),
             "Domácí": f["home_team"],
+            " ": f.get("away_logo", ""),
             "Hosté": f["away_team"],
             "P(H)%": round(f["prob_home"] * 100, 1),
             "P(D)%": round(f["prob_draw"] * 100, 1),
@@ -331,7 +335,15 @@ with tab_pred:
         styled = df.style.applymap(highlight_high, subset=prob_cols).format(
             {col: "{:.1f}" for col in prob_cols}
         )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "": st.column_config.ImageColumn("", width="small"),
+                " ": st.column_config.ImageColumn(" ", width="small"),
+            },
+        )
 
         st.divider()
         st.subheader("Přidat ke sledování")

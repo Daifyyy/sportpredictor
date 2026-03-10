@@ -117,6 +117,8 @@ def main():
                     league=league_key,
                     home_team=fx.home_team.name,
                     away_team=fx.away_team.name,
+                    home_logo=fx.home_team.logo or None,
+                    away_logo=fx.away_team.logo or None,
                     match_date=fx.date,
                     prob_home=round(pred.prob_home, 4),
                     prob_draw=round(pred.prob_draw, 4),

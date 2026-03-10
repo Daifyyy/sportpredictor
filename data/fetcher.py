@@ -68,8 +68,8 @@ class FootballFetcher:
             date=datetime.fromisoformat(f["date"].replace("Z", "+00:00")),
             league_id=raw["league"]["id"],
             season=raw["league"]["season"],
-            home_team=Team(teams["home"]["id"], teams["home"]["name"], ""),
-            away_team=Team(teams["away"]["id"], teams["away"]["name"], ""),
+            home_team=Team(teams["home"]["id"], teams["home"]["name"], "", teams["home"].get("logo", "")),
+            away_team=Team(teams["away"]["id"], teams["away"]["name"], "", teams["away"].get("logo", "")),
             result=MatchResult(goals["home"] or 0, goals["away"] or 0)
                    if goals.get("home") is not None else None,
             status=f["status"]["short"],
