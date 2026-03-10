@@ -91,7 +91,7 @@ def get_model(league_key: str) -> EnsembleDCPredictor | None:
         dc_recent = DixonColesPredictor()
         dc_recent.train(recent_fixtures)
 
-    return EnsembleDCPredictor(dc_all, dc_season, dc_recent)
+    return EnsembleDCPredictor(dc_all, dc_season, dc_recent, league_key=league_key)
 
 
 def get_db() -> SASession:

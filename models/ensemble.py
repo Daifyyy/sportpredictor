@@ -6,10 +6,17 @@ from scipy.stats import poisson
 from data.models import Fixture, Prediction
 from models.poisson import DixonColesPredictor
 
-# Weights for each time window
+# Weights for domestic leagues (enough data per team)
 W_ALL = 0.25
 W_SEASON = 0.45
 W_RECENT = 0.30
+
+# Weights for cup competitions (few matches per team → rely more on full history)
+W_ALL_CUP = 0.60
+W_SEASON_CUP = 0.30
+W_RECENT_CUP = 0.10
+
+CUP_LEAGUES = {"champions_league", "europa_league", "conference_league"}
 
 
 class EnsembleDCPredictor:
@@ -28,17 +35,23 @@ class EnsembleDCPredictor:
         dc_all: DixonColesPredictor,
         dc_season: DixonColesPredictor,
         dc_recent: Optional[DixonColesPredictor],
+        league_key: str = "",
     ):
         self.dc_all = dc_all
         self.dc_season = dc_season
         self.dc_recent = dc_recent
 
+        is_cup = league_key in CUP_LEAGUES
+        w_all = W_ALL_CUP if is_cup else W_ALL
+        w_season = W_SEASON_CUP if is_cup else W_SEASON
+        w_recent = W_RECENT_CUP if is_cup else W_RECENT
+
         if dc_recent is not None:
-            self._w_all, self._w_season, self._w_recent = W_ALL, W_SEASON, W_RECENT
+            self._w_all, self._w_season, self._w_recent = w_all, w_season, w_recent
         else:
-            total = W_ALL + W_SEASON
-            self._w_all = W_ALL / total
-            self._w_season = W_SEASON / total
+            total = w_all + w_season
+            self._w_all = w_all / total
+            self._w_season = w_season / total
             self._w_recent = 0.0
 
     def _lam_mu(self, model: DixonColesPredictor, h_id: int, a_id: int):

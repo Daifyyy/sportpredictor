@@ -46,11 +46,20 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - **Value bet focus**: the product is built around edge detection (model prob vs. implied odds), not raw outcome prediction.
 - Odds are fetched from Bet365 (bookmaker ID 11 in API-Football).
 
-## Planned next steps (from PROJEKT_KONTEXT.md)
+## Current stack
 
-1. XGBoost model (same `BasePredictor` interface)
-2. Model ensemble (Dixon-Coles + XGBoost)
-3. Model persistence (pickle/joblib)
-4. FastAPI layer with endpoints `/predictions/{league}`, `/value-bets`, `/track-record`
-5. PostgreSQL for prediction history (SQLAlchemy)
-6. Frontend: Next.js or Streamlit dashboard
+- **Model**: `EnsembleDCPredictor` (`models/ensemble.py`) — blends 3 Dixon-Coles models (dc_all / dc_season / dc_recent) at λ/μ level
+- **Weights (leagues)**: dc_all=0.25, dc_season=0.45, dc_recent=0.30
+- **Weights (cups)**: dc_all=0.60, dc_season=0.30, dc_recent=0.10 — cups have fewer matches per team
+- **Cup leagues**: `champions_league`, `europa_league`, `conference_league` (defined in `CUP_LEAGUES` in ensemble.py)
+- **DB**: Supabase — `tracked_predictions` (user picks) + `fixture_predictions` (daily pre-computed cache)
+- **Automation**: GitHub Actions — `predict.yml` (10:00 UTC) + `resolve.yml` (23:00 UTC)
+- **Dashboard**: Streamlit Community Cloud (`dashboard.py`), reads DB directly
+
+## Planned next steps
+
+1. **Varianta C pro poháry** — použít parametry z domácích lig jako prior pro UCL/UEL MLE:
+   - Natrénuj DC model na domácích ligách → získej `attack[tým]`, `defense[tým]`
+   - Použij jako `x0` (startovací bod) pro UCL MLE místo nul
+   - UCL data jen doladí parametry, týmy co hrají málo pohárových zápasů zdědí domácí sílu
+   - Vyžaduje: mapování tým_id → liga, multi-league fetch před UCL tréninkem

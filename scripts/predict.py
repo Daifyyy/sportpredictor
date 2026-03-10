@@ -44,7 +44,7 @@ def compute_goal_probs(lam: float, mu: float) -> dict:
     }
 
 
-def train_ensemble(completed, cfg) -> EnsembleDCPredictor | None:
+def train_ensemble(completed, cfg, league_key: str = "") -> EnsembleDCPredictor | None:
     if len(completed) < 50:
         print(f"  Not enough data ({len(completed)} matches), skipping.")
         return None
@@ -79,7 +79,7 @@ def train_ensemble(completed, cfg) -> EnsembleDCPredictor | None:
         dc_recent = None
         print(f"  dc_recent skipped ({len(recent_fixtures)} recent matches)")
 
-    return EnsembleDCPredictor(dc_all, dc_season, dc_recent)
+    return EnsembleDCPredictor(dc_all, dc_season, dc_recent, league_key=league_key)
 
 
 def main():
@@ -94,7 +94,7 @@ def main():
 
             history = fetcher.get_fixtures(cfg, status="FT")
             completed = [f for f in history if f.result is not None]
-            model = train_ensemble(completed, cfg)
+            model = train_ensemble(completed, cfg, league_key=league_key)
             if model is None:
                 continue
 
