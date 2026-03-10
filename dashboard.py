@@ -23,7 +23,7 @@ from models.poisson import DixonColesPredictor
 MODELS_DIR = Path("models/saved")
 PREDICTION_TYPES = ["H", "D", "A", "Under2.5", "Over2.5", "Goals1-3", "Goals2-4", "BTTS_Yes", "BTTS_No"]
 
-flags = {"England": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Spain": "🇪🇸", "Germany": "🇩🇪", "Italy": "🇮🇹", "France": "🇫🇷"}
+flags = {"England": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Spain": "🇪🇸", "Germany": "🇩🇪", "Italy": "🇮🇹", "France": "🇫🇷", "Czech Republic": "🇨🇿", "Europe": "🇪🇺"}
 leagues_display = {
     k: f"{flags.get(cfg.country, '')} {cfg.name}"
     for k, cfg in settings.leagues.items()
