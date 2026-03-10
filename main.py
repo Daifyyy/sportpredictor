@@ -3,21 +3,16 @@ from pathlib import Path
 from config.settings import settings
 from api.client import APIClient
 from data.fetcher import FootballFetcher
-from features.engineer import FeatureEngineer
 from models.poisson import DixonColesPredictor
-from betting.value import ValueBetDetector
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 
 MODELS_DIR = Path("models/saved")
 
 
-
 def run():
-    client   = APIClient(settings)
-    fetcher  = FootballFetcher(client, settings)
-    detector = ValueBetDetector(min_edge=0.03)
-    engineer = FeatureEngineer(form_window=5)
+    client  = APIClient(settings)
+    fetcher = FootballFetcher(client, settings)
 
     for league_key, league in settings.leagues.items():
         print(f"\n{'='*50}")
@@ -44,17 +39,10 @@ def run():
 
         for fixture in upcoming:
             prediction = model.predict(fixture, history)
-            odds = fetcher.get_odds(fixture.id)
-            prediction = detector.detect(prediction, odds)
-
             print(f"\n  {fixture.home_team.name} vs {fixture.away_team.name}")
             print(f"  {fixture.date.strftime('%d.%m %H:%M')}")
             print(f"  P(H/D/A): {prediction.prob_home:.1%} / {prediction.prob_draw:.1%} / {prediction.prob_away:.1%}")
             print(f"  xG: {prediction.expected_goals_home:.2f} - {prediction.expected_goals_away:.2f}")
-            if prediction.value_bets:
-                print(f"  VALUE BETS:")
-                for vb in prediction.value_bets:
-                    print(f"    ✓ {vb}")
 
 
 if __name__ == "__main__":
