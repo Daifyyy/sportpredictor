@@ -243,21 +243,30 @@ with tab_pred:
     if not fixtures:
         st.info("Žádné nadcházející zápasy.")
     else:
+        prob_cols = ["P(H)%", "P(D)%", "P(A)%", "P(O2.5)%", "P(U2.5)%", "P(BTTS)%", "P(1-3g)%", "P(2-4g)%"]
         df = pd.DataFrame([{
             "Datum": f["date"][:16].replace("T", " "),
             "Domácí": f["home_team"],
             "Hosté": f["away_team"],
-            "P(H)%": f"{f['prob_home']*100:.1f}",
-            "P(D)%": f"{f['prob_draw']*100:.1f}",
-            "P(A)%": f"{f['prob_away']*100:.1f}",
-            "P(O2.5)%": f"{f['over2_5']*100:.1f}",
-            "P(U2.5)%": f"{f['under2_5']*100:.1f}",
-            "P(BTTS)%": f"{f['btts_yes']*100:.1f}",
-            "P(1-3g)%": f"{f['goals1_3']*100:.1f}",
-            "P(2-4g)%": f"{f['goals2_4']*100:.1f}",
+            "P(H)%": round(f["prob_home"] * 100, 1),
+            "P(D)%": round(f["prob_draw"] * 100, 1),
+            "P(A)%": round(f["prob_away"] * 100, 1),
+            "P(O2.5)%": round(f["over2_5"] * 100, 1),
+            "P(U2.5)%": round(f["under2_5"] * 100, 1),
+            "P(BTTS)%": round(f["btts_yes"] * 100, 1),
+            "P(1-3g)%": round(f["goals1_3"] * 100, 1),
+            "P(2-4g)%": round(f["goals2_4"] * 100, 1),
         } for f in fixtures])
 
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        def highlight_high(val):
+            if isinstance(val, float) and val >= 65:
+                return "background-color: #1a6e3c; color: white; font-weight: bold"
+            return ""
+
+        styled = df.style.applymap(highlight_high, subset=prob_cols).format(
+            {col: "{:.1f}" for col in prob_cols}
+        )
+        st.dataframe(styled, use_container_width=True, hide_index=True)
 
         st.divider()
         st.subheader("Přidat ke sledování")
