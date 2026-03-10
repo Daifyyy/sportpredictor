@@ -17,6 +17,7 @@ from config.settings import settings
 from data.fetcher import FootballFetcher
 from db.models import Base, TrackedPrediction
 from db.session import engine
+from models.ensemble import EnsembleDCPredictor
 from models.poisson import DixonColesPredictor
 
 MODELS_DIR = Path("models/saved")
@@ -39,25 +40,58 @@ def get_fetcher():
 
 
 @st.cache_resource(show_spinner=False)
-def get_model(league_key: str) -> DixonColesPredictor | None:
+def get_model(league_key: str) -> EnsembleDCPredictor | None:
+    from datetime import timedelta
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    path = MODELS_DIR / f"dixon_coles_{league_key}.joblib"
-    if path.exists():
-        try:
-            return DixonColesPredictor.load(path)
-        except Exception:
-            pass
-    # Train fresh
+
     fetcher = get_fetcher()
     cfg = settings.leagues[league_key]
     history = fetcher.get_fixtures(cfg, status="FT")
     completed = [f for f in history if f.result is not None]
+
     if len(completed) < 50:
         return None
-    m = DixonColesPredictor()
-    m.train(completed)
-    m.save(path)
-    return m
+
+    # dc_all — full history
+    path_all = MODELS_DIR / f"dc_all_{league_key}.joblib"
+    if path_all.exists():
+        try:
+            dc_all = DixonColesPredictor.load(path_all)
+        except Exception:
+            dc_all = None
+    else:
+        dc_all = None
+    if dc_all is None:
+        dc_all = DixonColesPredictor()
+        dc_all.train(completed)
+        dc_all.save(path_all)
+
+    # dc_season — current season only
+    season_fixtures = [f for f in completed if f.season == cfg.season]
+    dc_season = None
+    if len(season_fixtures) >= 30:
+        path_season = MODELS_DIR / f"dc_season_{league_key}.joblib"
+        if path_season.exists():
+            try:
+                dc_season = DixonColesPredictor.load(path_season)
+            except Exception:
+                dc_season = None
+        if dc_season is None:
+            dc_season = DixonColesPredictor()
+            dc_season.train(season_fixtures)
+            dc_season.save(path_season)
+    if dc_season is None:
+        dc_season = dc_all  # fallback
+
+    # dc_recent — last 60 days
+    cutoff = max(f.date for f in completed) - timedelta(days=60)
+    recent_fixtures = [f for f in completed if f.date >= cutoff]
+    dc_recent = None
+    if len(recent_fixtures) >= 30:
+        dc_recent = DixonColesPredictor()
+        dc_recent.train(recent_fixtures)
+
+    return EnsembleDCPredictor(dc_all, dc_season, dc_recent)
 
 
 def get_db() -> SASession:
