@@ -7,6 +7,27 @@ class Base(DeclarativeBase):
     pass
 
 
+class FixturePrediction(Base):
+    """Pre-computed model predictions for upcoming fixtures (refreshed daily by GitHub Actions)."""
+    __tablename__ = "fixture_predictions"
+
+    fixture_id = Column(Integer, primary_key=True)
+    league = Column(String, nullable=False)
+    home_team = Column(String, nullable=False)
+    away_team = Column(String, nullable=False)
+    match_date = Column(DateTime(timezone=True), nullable=False)
+    prob_home = Column(Float, nullable=False)
+    prob_draw = Column(Float, nullable=False)
+    prob_away = Column(Float, nullable=False)
+    over2_5 = Column(Float, nullable=False)
+    under2_5 = Column(Float, nullable=False)
+    goals1_3 = Column(Float, nullable=False)
+    goals2_4 = Column(Float, nullable=False)
+    btts_yes = Column(Float, nullable=False)
+    btts_no = Column(Float, nullable=False)
+    computed_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class TrackedPrediction(Base):
     __tablename__ = "tracked_predictions"
 

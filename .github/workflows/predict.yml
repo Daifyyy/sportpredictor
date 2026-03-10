@@ -1,0 +1,22 @@
+name: Daily Predictions
+
+on:
+  schedule:
+    - cron: '0 10 * * *'  # 10:00 UTC daily
+  workflow_dispatch:  # allow manual trigger
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run predictions
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: python scripts/predict.py

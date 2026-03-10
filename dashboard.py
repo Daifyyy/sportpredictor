@@ -15,7 +15,7 @@ for _k in ["DATABASE_URL", "API_FOOTBALL_KEY"]:
 from api.client import APIClient
 from config.settings import settings
 from data.fetcher import FootballFetcher
-from db.models import Base, TrackedPrediction
+from db.models import Base, FixturePrediction, TrackedPrediction
 from db.session import engine
 from models.ensemble import EnsembleDCPredictor
 from models.poisson import DixonColesPredictor
@@ -236,41 +236,72 @@ with tab_pred:
         key="pred_league",
     )
 
-    if st.button("Načíst predikce", key="load_pred"):
-        st.session_state.pop("upcoming_data", None)
-        st.session_state.pop("upcoming_league", None)
+    col_btn1, col_btn2 = st.columns([1, 4])
+    with col_btn1:
+        refresh = st.button("Obnovit", key="load_pred")
 
-    if st.session_state.get("upcoming_league") != league:
+    if refresh or st.session_state.get("upcoming_league") != league:
         st.session_state.pop("upcoming_data", None)
 
     if "upcoming_data" not in st.session_state:
-        with st.spinner("Načítám predikce... (první spuštění může trvat déle)"):
-            model = get_model(league)
-            if model is None:
-                st.warning("Model není dostupný — nedostatek dat pro tuto ligu.")
-                st.session_state["upcoming_data"] = []
-            else:
-                fetcher = get_fetcher()
-                cfg = settings.leagues[league]
-                fixtures = fetcher.get_upcoming_fixtures(cfg, next_n=10)
-                data = []
-                for fx in fixtures:
-                    pred = model.predict(fx)
-                    lam = pred.expected_goals_home or 1.3
-                    mu = pred.expected_goals_away or 1.0
-                    gp = compute_goal_probs(lam, mu)
-                    data.append({
-                        "fixture_id": fx.id,
-                        "date": fx.date.isoformat(),
-                        "home_team": fx.home_team.name,
-                        "away_team": fx.away_team.name,
-                        "prob_home": round(pred.prob_home, 4),
-                        "prob_draw": round(pred.prob_draw, 4),
-                        "prob_away": round(pred.prob_away, 4),
-                        **gp,
-                    })
-                st.session_state["upcoming_data"] = data
-                st.session_state["upcoming_league"] = league
+        # Primary: load from DB (pre-computed by GitHub Actions)
+        with get_db() as db:
+            rows = (
+                db.query(FixturePrediction)
+                .filter(FixturePrediction.league == league)
+                .order_by(FixturePrediction.match_date)
+                .all()
+            )
+
+        if rows:
+            computed_at = rows[0].computed_at
+            data = [{
+                "fixture_id": r.fixture_id,
+                "date": r.match_date.isoformat(),
+                "home_team": r.home_team,
+                "away_team": r.away_team,
+                "prob_home": r.prob_home,
+                "prob_draw": r.prob_draw,
+                "prob_away": r.prob_away,
+                "over2_5": r.over2_5,
+                "under2_5": r.under2_5,
+                "goals1_3": r.goals1_3,
+                "goals2_4": r.goals2_4,
+                "btts_yes": r.btts_yes,
+                "btts_no": r.btts_no,
+            } for r in rows]
+            st.session_state["upcoming_data"] = data
+            st.session_state["upcoming_league"] = league
+            if computed_at:
+                st.caption(f"Naposledy přepočítáno: {computed_at.strftime('%d.%m.%Y %H:%M')} UTC")
+        else:
+            # Fallback: compute live (DB not yet populated)
+            st.info("DB není naplněna — počítám live (GitHub Actions ještě neproběhly).")
+            with st.spinner("Načítám predikce..."):
+                model = get_model(league)
+                if model is None:
+                    st.warning("Model není dostupný — nedostatek dat pro tuto ligu.")
+                    st.session_state["upcoming_data"] = []
+                else:
+                    fetcher = get_fetcher()
+                    cfg = settings.leagues[league]
+                    fixtures = fetcher.get_upcoming_fixtures(cfg, next_n=10)
+                    data = []
+                    for fx in fixtures:
+                        pred = model.predict(fx)
+                        gp = compute_goal_probs(pred.expected_goals_home or 1.3, pred.expected_goals_away or 1.0)
+                        data.append({
+                            "fixture_id": fx.id,
+                            "date": fx.date.isoformat(),
+                            "home_team": fx.home_team.name,
+                            "away_team": fx.away_team.name,
+                            "prob_home": round(pred.prob_home, 4),
+                            "prob_draw": round(pred.prob_draw, 4),
+                            "prob_away": round(pred.prob_away, 4),
+                            **gp,
+                        })
+                    st.session_state["upcoming_data"] = data
+                    st.session_state["upcoming_league"] = league
 
     fixtures = st.session_state.get("upcoming_data", [])
 
