@@ -1,23 +1,26 @@
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
+import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
+from scipy.stats import poisson
+from sqlalchemy.orm import Session as SASession
 
-for _k in ["DATABASE_URL", "API_URL", "API_FOOTBALL_KEY"]:
+for _k in ["DATABASE_URL", "API_FOOTBALL_KEY"]:
     if _k in st.secrets and not os.getenv(_k):
         os.environ[_k] = st.secrets[_k]
 
-API = os.getenv("API_URL", "http://127.0.0.1:8000").rstrip("/")
-
+from api.client import APIClient
 from config.settings import settings
-from db.models import TrackedPrediction
+from data.fetcher import FootballFetcher
+from db.models import Base, TrackedPrediction
 from db.session import engine
-from sqlalchemy.orm import Session as SASession
+from models.poisson import DixonColesPredictor
 
-st.set_page_config(page_title="Football Tracker", page_icon="⚽", layout="wide")
-st.title("⚽ Football Prediction Tracker")
+MODELS_DIR = Path("models/saved")
+PREDICTION_TYPES = ["H", "D", "A", "Under2.5", "Over2.5", "Goals1-3", "Goals2-4", "BTTS_Yes", "BTTS_No"]
 
 flags = {"England": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Spain": "🇪🇸", "Germany": "🇩🇪", "Italy": "🇮🇹", "France": "🇫🇷"}
 leagues_display = {
@@ -26,17 +29,168 @@ leagues_display = {
 }
 league_keys = list(leagues_display.keys())
 
-PREDICTION_TYPES = ["H", "D", "A", "Under2.5", "Over2.5", "Goals1-3", "Goals2-4", "BTTS_Yes", "BTTS_No"]
+
+# ── Cached resources ───────────────────────────────────────────────────────────
+
+@st.cache_resource(show_spinner="Inicializuji API klienta...")
+def get_fetcher():
+    client = APIClient(settings)
+    return FootballFetcher(client, settings)
+
+
+@st.cache_resource(show_spinner=False)
+def get_model(league_key: str) -> DixonColesPredictor | None:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    path = MODELS_DIR / f"dixon_coles_{league_key}.joblib"
+    if path.exists():
+        try:
+            return DixonColesPredictor.load(path)
+        except Exception:
+            pass
+    # Train fresh
+    fetcher = get_fetcher()
+    cfg = settings.leagues[league_key]
+    history = fetcher.get_fixtures(cfg, status="FT")
+    completed = [f for f in history if f.result is not None]
+    if len(completed) < 50:
+        return None
+    m = DixonColesPredictor()
+    m.train(completed)
+    m.save(path)
+    return m
 
 
 def get_db() -> SASession:
     return SASession(engine)
 
 
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def compute_goal_probs(lam: float, mu: float) -> dict:
+    max_g = 10
+    h_pmf = poisson.pmf(range(max_g), lam)
+    a_pmf = poisson.pmf(range(max_g), mu)
+    mat = np.outer(h_pmf, a_pmf)
+    tg = np.zeros(max_g * 2 - 1)
+    for i in range(max_g):
+        for j in range(max_g):
+            tg[i + j] += mat[i, j]
+    btts = float(sum(mat[i, j] for i in range(1, max_g) for j in range(1, max_g)))
+    return {
+        "over2_5": round(float(tg[3:].sum()), 4),
+        "under2_5": round(float(tg[:3].sum()), 4),
+        "goals1_3": round(float(tg[1:4].sum()), 4),
+        "goals2_4": round(float(tg[2:5].sum()), 4),
+        "btts_yes": round(btts, 4),
+        "btts_no": round(1 - btts, 4),
+    }
+
+
+def compute_correct(prediction_type: str, hs: int, as_: int) -> bool:
+    total = hs + as_
+    if prediction_type == "H":
+        return hs > as_
+    if prediction_type == "D":
+        return hs == as_
+    if prediction_type == "A":
+        return as_ > hs
+    if prediction_type == "Under2.5":
+        return total <= 2
+    if prediction_type == "Over2.5":
+        return total >= 3
+    if prediction_type == "Goals1-3":
+        return 1 <= total <= 3
+    if prediction_type == "Goals2-4":
+        return 2 <= total <= 4
+    if prediction_type == "BTTS_Yes":
+        return hs >= 1 and as_ >= 1
+    if prediction_type == "BTTS_No":
+        return hs == 0 or as_ == 0
+    return False
+
+
+def run_resolve() -> int:
+    now = datetime.now(timezone.utc)
+    client = APIClient(settings)
+    resolved = 0
+    with get_db() as db:
+        pending = db.query(TrackedPrediction).filter(
+            TrackedPrediction.correct.is_(None),
+            TrackedPrediction.match_date < now,
+        ).all()
+        if not pending:
+            return 0
+        fixture_ids = list({r.fixture_id for r in pending})
+        results_by_id: dict[int, tuple[int, int]] = {}
+        for fid in fixture_ids:
+            data = client.get("fixtures", {"id": fid}, ttl=3600)
+            if not data:
+                continue
+            response = data.get("response", [])
+            if not response:
+                continue
+            raw = response[0]
+            goals = raw.get("goals", {})
+            status = raw["fixture"]["status"]["short"]
+            if status == "FT" and goals.get("home") is not None:
+                results_by_id[fid] = (int(goals["home"]), int(goals["away"]))
+        for row in pending:
+            if row.fixture_id not in results_by_id:
+                continue
+            hs, as_ = results_by_id[row.fixture_id]
+            row.home_score = hs
+            row.away_score = as_
+            row.actual_outcome = f"{hs}-{as_}"
+            row.correct = compute_correct(row.prediction_type, hs, as_)
+            resolved += 1
+        db.commit()
+    return resolved
+
+
+def save_tracking(fixture: dict, league: str, prediction_type: str, model_prob: float | None) -> str:
+    prob_map = {
+        "H": fixture.get("prob_home"),
+        "D": fixture.get("prob_draw"),
+        "A": fixture.get("prob_away"),
+        "Under2.5": fixture.get("under2_5"),
+        "Over2.5": fixture.get("over2_5"),
+        "Goals1-3": fixture.get("goals1_3"),
+        "Goals2-4": fixture.get("goals2_4"),
+        "BTTS_Yes": fixture.get("btts_yes"),
+        "BTTS_No": fixture.get("btts_no"),
+    }
+    with get_db() as db:
+        existing = db.query(TrackedPrediction).filter(
+            TrackedPrediction.fixture_id == fixture["fixture_id"],
+            TrackedPrediction.prediction_type == prediction_type,
+        ).first()
+        if existing:
+            return "duplicate"
+        row = TrackedPrediction(
+            fixture_id=fixture["fixture_id"],
+            league=league,
+            home_team=fixture["home_team"],
+            away_team=fixture["away_team"],
+            match_date=datetime.fromisoformat(fixture["date"]),
+            prediction_type=prediction_type,
+            model_prob=prob_map.get(prediction_type),
+        )
+        db.add(row)
+        db.commit()
+    return "ok"
+
+
+# ── App layout ─────────────────────────────────────────────────────────────────
+
+Base.metadata.create_all(engine)
+
+st.set_page_config(page_title="Football Tracker", page_icon="⚽", layout="wide")
+st.title("⚽ Football Prediction Tracker")
+
 tab_pred, tab_tracked, tab_stats = st.tabs(["📅 Predikce", "📋 Sledované predikce", "📊 Statistiky"])
 
 
-# ── TAB 1: Predikce ──────────────────────────────────────────────────────────
+# ── TAB 1: Predikce ────────────────────────────────────────────────────────────
 
 with tab_pred:
     st.subheader("Nadcházející zápasy")
@@ -49,30 +203,45 @@ with tab_pred:
     )
 
     if st.button("Načíst predikce", key="load_pred"):
-        st.session_state["upcoming_data"] = None
-        st.session_state["upcoming_league"] = None
+        st.session_state.pop("upcoming_data", None)
+        st.session_state.pop("upcoming_league", None)
 
     if st.session_state.get("upcoming_league") != league:
-        st.session_state["upcoming_data"] = None
+        st.session_state.pop("upcoming_data", None)
 
-    if st.session_state.get("upcoming_data") is None:
-        with st.spinner("Načítám..."):
-            try:
-                r = requests.get(f"{API}/upcoming/{league}", timeout=60)
-                if r.ok:
-                    st.session_state["upcoming_data"] = r.json()
-                    st.session_state["upcoming_league"] = league
-                else:
-                    st.error(f"API error: {r.text}")
-                    st.session_state["upcoming_data"] = []
-            except Exception as e:
-                st.error(f"Nelze se připojit k API: {e}")
+    if "upcoming_data" not in st.session_state:
+        with st.spinner("Načítám predikce... (první spuštění může trvat déle)"):
+            model = get_model(league)
+            if model is None:
+                st.warning("Model není dostupný — nedostatek dat pro tuto ligu.")
                 st.session_state["upcoming_data"] = []
+            else:
+                fetcher = get_fetcher()
+                cfg = settings.leagues[league]
+                fixtures = fetcher.get_upcoming_fixtures(cfg, next_n=10)
+                data = []
+                for fx in fixtures:
+                    pred = model.predict(fx)
+                    lam = pred.expected_goals_home or 1.3
+                    mu = pred.expected_goals_away or 1.0
+                    gp = compute_goal_probs(lam, mu)
+                    data.append({
+                        "fixture_id": fx.id,
+                        "date": fx.date.isoformat(),
+                        "home_team": fx.home_team.name,
+                        "away_team": fx.away_team.name,
+                        "prob_home": round(pred.prob_home, 4),
+                        "prob_draw": round(pred.prob_draw, 4),
+                        "prob_away": round(pred.prob_away, 4),
+                        **gp,
+                    })
+                st.session_state["upcoming_data"] = data
+                st.session_state["upcoming_league"] = league
 
-    fixtures = st.session_state.get("upcoming_data") or []
+    fixtures = st.session_state.get("upcoming_data", [])
 
     if not fixtures:
-        st.info("Žádné nadcházející zápasy nebo API není dostupné.")
+        st.info("Žádné nadcházející zápasy.")
     else:
         df = pd.DataFrame([{
             "Datum": f["date"][:16].replace("T", " "),
@@ -102,39 +271,16 @@ with tab_pred:
 
         if st.button("Přidat ke sledování", key="add_track"):
             chosen = match_options[selected_match_label]
-            prob_map = {
-                "H": chosen["prob_home"],
-                "D": chosen["prob_draw"],
-                "A": chosen["prob_away"],
-                "Under2.5": chosen["under2_5"],
-                "Over2.5": chosen["over2_5"],
-                "Goals1-3": chosen["goals1_3"],
-                "Goals2-4": chosen["goals2_4"],
-                "BTTS_Yes": chosen["btts_yes"],
-                "BTTS_No": chosen["btts_no"],
-            }
-            payload = {
-                "fixture_id": chosen["fixture_id"],
-                "league": league,
-                "home_team": chosen["home_team"],
-                "away_team": chosen["away_team"],
-                "match_date": chosen["date"],
-                "prediction_type": selected_pred_type,
-                "model_prob": prob_map.get(selected_pred_type),
-            }
-            try:
-                resp = requests.post(f"{API}/track", json=payload, timeout=10)
-                if resp.status_code == 200:
-                    st.success("Predikce přidána ke sledování.")
-                elif resp.status_code == 409:
-                    st.warning("Tato predikce je již sledována.")
-                else:
-                    st.error(f"Chyba: {resp.text}")
-            except Exception as e:
-                st.error(f"Chyba připojení: {e}")
+            result = save_tracking(chosen, league, selected_pred_type, None)
+            if result == "ok":
+                st.success("Predikce přidána ke sledování.")
+            elif result == "duplicate":
+                st.warning("Tato predikce je již sledována.")
+            else:
+                st.error("Chyba při ukládání.")
 
 
-# ── TAB 2: Sledované predikce ─────────────────────────────────────────────────
+# ── TAB 2: Sledované predikce ──────────────────────────────────────────────────
 
 with tab_tracked:
     st.subheader("Sledované predikce")
@@ -156,15 +302,8 @@ with tab_tracked:
 
     if st.button("Resolve výsledků", key="resolve_btn"):
         with st.spinner("Resolvuji..."):
-            try:
-                r = requests.post(f"{API}/resolve", timeout=120)
-                if r.ok:
-                    d = r.json()
-                    st.success(f"Vyřešeno: {d['resolved']} predikcí")
-                else:
-                    st.error(f"Chyba: {r.text}")
-            except Exception as e:
-                st.error(f"Chyba připojení: {e}")
+            count = run_resolve()
+            st.success(f"Vyřešeno: {count} predikcí")
 
     with get_db() as db:
         q = db.query(TrackedPrediction)
@@ -187,10 +326,8 @@ with tab_tracked:
                 status_icon = "❌"
             else:
                 status_icon = "⏳"
-
             score = f"{r.home_score}-{r.away_score}" if r.home_score is not None else "—"
             prob_str = f"{r.model_prob*100:.1f}%" if r.model_prob is not None else "—"
-
             table_data.append({
                 "Datum": r.match_date.strftime("%d.%m.%Y %H:%M"),
                 "Liga": leagues_display.get(r.league, r.league),
@@ -200,11 +337,10 @@ with tab_tracked:
                 "Skóre": score,
                 "Správně?": status_icon,
             })
-
         st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
 
-# ── TAB 3: Statistiky ─────────────────────────────────────────────────────────
+# ── TAB 3: Statistiky ──────────────────────────────────────────────────────────
 
 with tab_stats:
     st.subheader("Statistiky")
@@ -222,24 +358,18 @@ with tab_stats:
         overall_pct = total_correct / total * 100 if total else 0
 
         st.metric("Celková úspěšnost", f"{overall_pct:.1f}%", f"{total_correct}/{total} správně")
-
         st.divider()
 
         by_type: dict[str, dict] = {}
         by_league: dict[str, dict] = {}
 
         for r in all_rows:
-            if r.prediction_type not in by_type:
-                by_type[r.prediction_type] = {"count": 0, "correct": 0}
-            by_type[r.prediction_type]["count"] += 1
-            if r.correct:
-                by_type[r.prediction_type]["correct"] += 1
-
-            if r.league not in by_league:
-                by_league[r.league] = {"count": 0, "correct": 0}
-            by_league[r.league]["count"] += 1
-            if r.correct:
-                by_league[r.league]["correct"] += 1
+            for key, bucket in [(r.prediction_type, by_type), (r.league, by_league)]:
+                if key not in bucket:
+                    bucket[key] = {"count": 0, "correct": 0}
+                bucket[key]["count"] += 1
+                if r.correct:
+                    bucket[key]["correct"] += 1
 
         col1, col2 = st.columns(2)
 
@@ -250,13 +380,12 @@ with tab_stats:
                     "Typ": k,
                     "Počet": v["count"],
                     "Správně": v["correct"],
-                    "Úspěšnost %": round(v["correct"] / v["count"] * 100, 1) if v["count"] else 0,
+                    "Úspěšnost %": round(v["correct"] / v["count"] * 100, 1),
                 }
                 for k, v in by_type.items()
             ]
             df_type = pd.DataFrame(type_rows).sort_values("Úspěšnost %", ascending=False)
             st.dataframe(df_type, use_container_width=True, hide_index=True)
-
             if not df_type.empty:
                 st.bar_chart(df_type.set_index("Typ")["Úspěšnost %"])
 
@@ -267,12 +396,11 @@ with tab_stats:
                     "Liga": leagues_display.get(k, k),
                     "Počet": v["count"],
                     "Správně": v["correct"],
-                    "Úspěšnost %": round(v["correct"] / v["count"] * 100, 1) if v["count"] else 0,
+                    "Úspěšnost %": round(v["correct"] / v["count"] * 100, 1),
                 }
                 for k, v in by_league.items()
             ]
             df_league = pd.DataFrame(league_rows).sort_values("Úspěšnost %", ascending=False)
             st.dataframe(df_league, use_container_width=True, hide_index=True)
-
             if not df_league.empty:
                 st.bar_chart(df_league.set_index("Liga")["Úspěšnost %"])
