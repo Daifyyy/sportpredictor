@@ -399,6 +399,7 @@ def save_tracking(fixture: dict, league: str, prediction_type: str, model_prob: 
         ).first()
         if existing:
             return "duplicate"
+        orig_prob = prob_map.get(prediction_type)
         row = TrackedPrediction(
             fixture_id=fixture["fixture_id"],
             league=league,
@@ -406,7 +407,8 @@ def save_tracking(fixture: dict, league: str, prediction_type: str, model_prob: 
             away_team=fixture["away_team"],
             match_date=datetime.fromisoformat(fixture["date"]),
             prediction_type=prediction_type,
-            model_prob=prob_map.get(prediction_type),
+            tracked_prob=orig_prob,
+            model_prob=orig_prob,
         )
         db.add(row)
         db.commit()
@@ -691,14 +693,29 @@ with tab_tracked:
                 status_icon = "⏳"
             score = f"{r.home_score}-{r.away_score}" if r.home_score is not None else "—"
             prob_str = f"{r.model_prob*100:.1f}%" if r.model_prob is not None else "—"
+
+            # Probability drift: tracked_prob (at time of adding) vs model_prob (latest recalc)
+            tracked = getattr(r, "tracked_prob", None)
+            current = r.model_prob
+            if r.correct is None and tracked is not None and current is not None:
+                delta = (current - tracked) * 100
+                if abs(delta) >= 1:
+                    icon = "🟢" if delta >= 3 else ("🔴" if delta <= -3 else "🟡")
+                    drift = f"{tracked*100:.1f}→{current*100:.1f} ({delta:+.1f}pp) {icon}"
+                else:
+                    drift = f"{current*100:.1f}% →"
+            else:
+                drift = "—"
+
             table_data.append({
                 "Datum": r.match_date.strftime("%d.%m.%Y %H:%M"),
                 "Liga": leagues_display.get(r.league, r.league),
                 "Zápas": f"{r.home_team} vs {r.away_team}",
-                "Typ predikce": r.prediction_type,
-                "Pravděpodobnost": prob_str,
+                "Typ": r.prediction_type,
+                "Přidáno": f"{tracked*100:.1f}%" if tracked is not None else prob_str,
+                "Vývoj": drift,
                 "Skóre": score,
-                "Správně?": status_icon,
+                "✓": status_icon,
             })
         st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 

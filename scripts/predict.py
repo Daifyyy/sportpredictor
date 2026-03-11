@@ -19,7 +19,7 @@ from api.client import APIClient
 from config.settings import settings
 from data.fetcher import FootballFetcher
 from data.models import Prediction
-from db.models import Base, FixturePrediction, ResolvedFixturePrediction
+from db.models import Base, FixturePrediction, ResolvedFixturePrediction, TrackedPrediction
 from db.session import SessionLocal, engine
 from features.engineer import FeatureEngineer
 from models.calibrator import ProbabilityCalibrator
@@ -237,6 +237,38 @@ def archive_resolved_fixtures(db, client, league_key: str, completed) -> int:
     return len(to_archive)
 
 
+_PROB_FIELD = {
+    "H": "prob_home", "D": "prob_draw", "A": "prob_away",
+    "Under2.5": "under2_5", "Over2.5": "over2_5",
+    "Goals1-3": "goals1_3", "Goals2-4": "goals2_4",
+    "BTTS_Yes": "btts_yes", "BTTS_No": "btts_no",
+}
+
+
+def update_tracked_probs(db, saved: dict) -> int:
+    """Update model_prob for unresolved tracked_predictions whose fixture was just recalculated.
+
+    saved: {fixture_id: FixturePrediction} — rows committed in current run.
+    Returns number of updated rows.
+    """
+    if not saved:
+        return 0
+    pending = db.query(TrackedPrediction).filter(
+        TrackedPrediction.correct.is_(None),
+        TrackedPrediction.fixture_id.in_(saved.keys()),
+    ).all()
+    updated = 0
+    for tp in pending:
+        fp = saved.get(tp.fixture_id)
+        field = _PROB_FIELD.get(tp.prediction_type)
+        if fp and field:
+            tp.model_prob = getattr(fp, field, None)
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
+
+
 def build_calibrator(completed, league_key: str, min_train: int = 100, retrain_every: int = 50) -> ProbabilityCalibrator | None:
     """Walk-forward calibration data collection using dc_all only (fast).
 
@@ -356,6 +388,7 @@ def main():
 
             cal = calibrators.get(league_key)
 
+            saved_predictions: dict = {}  # fixture_id -> FixturePrediction, for tracked prob update
             for fx in upcoming:
                 pred = model.predict(fx)
 
@@ -404,10 +437,15 @@ def main():
                     expected_goals_away=round(pred.expected_goals_away, 3),
                 )
                 db.add(row)
+                saved_predictions[fx.id] = row
                 print(f"  {fx.home_team.name} vs {fx.away_team.name} | H:{pred.prob_home:.0%} D:{pred.prob_draw:.0%} A:{pred.prob_away:.0%} | λ={pred.expected_goals_home:.2f} μ={pred.expected_goals_away:.2f}")
 
             db.commit()
             print(f"  Saved {len(upcoming)} predictions.")
+
+            n_updated = update_tracked_probs(db, saved_predictions)
+            if n_updated:
+                print(f"  Updated model_prob for {n_updated} tracked prediction(s).")
 
     finally:
         db.close()

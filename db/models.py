@@ -76,7 +76,8 @@ class TrackedPrediction(Base):
     away_team = Column(String, nullable=False)
     match_date = Column(DateTime(timezone=True), nullable=False)
     prediction_type = Column(String, nullable=False)  # H/D/A/Under2.5/Over2.5/Goals1-3/Goals2-4/BTTS_Yes/BTTS_No
-    model_prob = Column(Float, nullable=True)
+    tracked_prob = Column(Float, nullable=True)   # original prob at time of tracking — never updated
+    model_prob = Column(Float, nullable=True)     # updated daily by predict.py after each recalculation
     actual_outcome = Column(String, nullable=True)
     correct = Column(Boolean, nullable=True)
     home_score = Column(Integer, nullable=True)
