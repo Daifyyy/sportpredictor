@@ -1,5 +1,6 @@
 import json
 import os
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -140,8 +141,8 @@ def get_league_injuries(league_key: str) -> dict:
         except Exception:
             home_inj, away_inj, home_goals, away_goals = [], [], 50, 50
         result[fx.id] = {
-            "home": home_inj,
-            "away": away_inj,
+            "home": [asdict(i) for i in home_inj],
+            "away": [asdict(i) for i in away_inj],
             "home_goals": home_goals,
             "away_goals": away_goals,
         }
@@ -261,20 +262,21 @@ def render_injuries(
 
     st.caption("🚑 Zranění a absence")
 
-    def fmt_player(inj, team_goals: int) -> str:
-        icon = _STATUS_ICON.get(inj.status, "🔴")
-        pos  = _POS_CZ.get(inj.position, inj.position)
-        atk, dfn = _injury_adjuster.player_impact(inj, team_goals)
+    def fmt_player(inj: dict, team_goals: int) -> str:
+        from data.models import PlayerInjury
+        icon = _STATUS_ICON.get(inj["status"], "🔴")
+        pos  = _POS_CZ.get(inj["position"], inj["position"])
+        atk, dfn = _injury_adjuster.player_impact(PlayerInjury(**inj), team_goals)
         impact = atk or dfn
 
-        if inj.position in ("Attacker", "Midfielder"):
-            stat_str = f"{inj.goals}G {inj.assists}A"
+        if inj["position"] in ("Attacker", "Midfielder"):
+            stat_str = f"{inj['goals']}G {inj['assists']}A"
         else:
-            stat_str = f"{inj.minutes} min"
+            stat_str = f"{inj['minutes']} min"
 
         impact_str = f" · **−{impact*100:.0f}% λ**" if impact >= 0.01 else ""
-        status_str = "Chybí" if inj.status == "Missing" else "Pochybný"
-        return f"{icon} {inj.player_name} *({pos})* · {stat_str}{impact_str} · {status_str}"
+        status_str = "Chybí" if inj["status"] == "Missing" else "Pochybný"
+        return f"{icon} {inj['player_name']} *({pos})* · {stat_str}{impact_str} · {status_str}"
 
     col_h, col_a = st.columns(2)
     with col_h:
