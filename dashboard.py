@@ -17,6 +17,7 @@ from config.settings import settings
 from data.fetcher import FootballFetcher
 from db.models import Base, FixturePrediction, TrackedPrediction
 from db.session import engine
+from features.engineer import FeatureEngineer
 from models.ensemble import EnsembleDCPredictor
 from models.poisson import DixonColesPredictor
 
@@ -92,6 +93,127 @@ def get_model(league_key: str) -> EnsembleDCPredictor | None:
         dc_recent.train(recent_fixtures)
 
     return EnsembleDCPredictor(dc_all, dc_season, dc_recent, league_key=league_key)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_league_features(league_key: str) -> tuple[dict, dict]:
+    """Compute FeatureEngineer stats for all upcoming fixtures + league averages."""
+    fetcher = get_fetcher()
+    cfg = settings.leagues[league_key]
+    history = fetcher.get_fixtures(cfg, status="FT")
+    completed = [f for f in history if f.result is not None]
+    upcoming = fetcher.get_upcoming_fixtures(cfg, next_n=10)
+
+    if len(completed) < 20 or not upcoming:
+        return {}, {}
+
+    fe = FeatureEngineer()
+    fe.precompute(completed)
+    features_by_id = {fx.id: fe.build_features(fx, completed) for fx in upcoming}
+
+    n = len(completed)
+    total_goals = sum(f.result.home_goals + f.result.away_goals for f in completed)
+    wins = sum(1 for f in completed if f.result.outcome in ("H", "A"))
+    draws = sum(1 for f in completed if f.result.outcome == "D")
+    league_avg = {
+        "avg_gf": round(total_goals / (2 * n), 2),
+        "avg_pts": round((3 * wins + 2 * draws) / (2 * n), 2),
+    }
+    return features_by_id, league_avg
+
+
+def _fv(val, fmt=".2f") -> str:
+    """Format a numeric feature value; return '—' for missing/zero defaults."""
+    if isinstance(val, (int, float)):
+        try:
+            return f"{val:{fmt}}"
+        except (ValueError, TypeError):
+            return str(round(val, 2))
+    return "—"
+
+
+def render_match_detail(fx_data: dict, feats: dict, league_avg: dict) -> None:
+    home = fx_data["home_team"]
+    away = fx_data["away_team"]
+    avg_gf = league_avg.get("avg_gf", 1.4)
+    avg_pts = league_avg.get("avg_pts", 1.2)
+
+    # Probability summary
+    pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+    pc1.metric(f"1 — {home[:14]}", f"{fx_data['prob_home'] * 100:.1f}%")
+    pc2.metric("X — Remíza", f"{fx_data['prob_draw'] * 100:.1f}%")
+    pc3.metric(f"2 — {away[:14]}", f"{fx_data['prob_away'] * 100:.1f}%")
+    pc4.metric("Over 2.5", f"{fx_data['over2_5'] * 100:.1f}%")
+    pc5.metric("BTTS Ano", f"{fx_data['btts_yes'] * 100:.1f}%")
+
+    if not feats:
+        st.caption("Statistiky nejsou k dispozici (nedostatek dat).")
+        return
+
+    st.divider()
+
+    HDR = "Statistika"
+    H_COL = f"🏠 {home}"
+    A_COL = f"✈ {away}"
+
+    def section(title: str, rows: list[list]) -> None:
+        st.markdown(f"**{title}**")
+        df = pd.DataFrame(rows, columns=[H_COL, HDR, A_COL])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # ── 1. Forma & Útok/Obrana ────────────────────────────────────────────────
+    section(
+        f"⚡ Forma & Útok/Obrana  (posl. 5 zápasů · liga ø GF: {avg_gf:.2f} | Pts/z: {avg_pts:.2f})",
+        [
+            [_fv(feats.get("home_form", 0)),          "Pts/zápas (celková forma)",  _fv(feats.get("away_form", 0))],
+            [_fv(feats.get("home_gf", 0)),             f"GF/zápas  (liga ø {avg_gf:.2f})", _fv(feats.get("away_gf", 0))],
+            [_fv(feats.get("home_ga", 0)),             f"GA/zápas  (liga ø {avg_gf:.2f})", _fv(feats.get("away_ga", 0))],
+            [_fv(feats.get("home_attack_str", 1)),     "Útočná síla (vs liga = 1.0)",  _fv(feats.get("away_attack_str", 1))],
+            [_fv(feats.get("home_defense_str", 1)),    "Obranná síla (vs liga = 1.0)", _fv(feats.get("away_defense_str", 1))],
+            [_fv(feats.get("home_gf_std", 0)),         "Konzistence GF (std)",         _fv(feats.get("away_gf_std", 0))],
+            [_fv(feats.get("home_ga_std", 0)),         "Konzistence GA (std)",         _fv(feats.get("away_ga_std", 0))],
+        ],
+    )
+
+    # ── 2. Domácí / Venkovní forma ─────────────────────────────────────────────
+    section(
+        "🏠 Domácí / ✈ Venkovní forma  (posl. 5 zápasů na hřišti / venku)",
+        [
+            [_fv(feats.get("home_venue_form", 0)),  "Pts/zápas (venue)",   _fv(feats.get("away_venue_form", 0))],
+            [_fv(feats.get("home_venue_gf", 0)),    "GF/zápas (venue)",    _fv(feats.get("away_venue_gf", 0))],
+            [_fv(feats.get("home_venue_ga", 0)),    "GA/zápas (venue)",    _fv(feats.get("away_venue_ga", 0))],
+        ],
+    )
+
+    # ── 3. Sezóna, Trend & Elo ────────────────────────────────────────────────
+    streak_h = feats.get("home_streak", 0)
+    streak_a = feats.get("away_streak", 0)
+    section(
+        "📅 Sezóna · Trend · Elo",
+        [
+            [_fv(feats.get("home_season_ppg", 0)),  f"PPG sezóna  (liga ø {avg_pts:.2f})",  _fv(feats.get("away_season_ppg", 0))],
+            [_fv(feats.get("home_form_short", 0)),  "Forma krátká (posl. 3)",               _fv(feats.get("away_form_short", 0))],
+            [_fv(feats.get("home_trend", 0), "+.2f"), "Trend (krátká − dlouhá)",            _fv(feats.get("away_trend", 0), "+.2f")],
+            [f"{streak_h:+.0f}" if isinstance(streak_h, (int, float)) else "—",
+             "Aktuální série (W=+, L=−)",
+             f"{streak_a:+.0f}" if isinstance(streak_a, (int, float)) else "—"],
+            [_fv(feats.get("elo_home", 1500), ".0f"), "Elo rating",                        _fv(feats.get("elo_away", 1500), ".0f")],
+            [_fv(feats.get("home_rest_days", 7), ".0f") + " dní",
+             "Dní od posledního zápasu",
+             _fv(feats.get("away_rest_days", 7), ".0f") + " dní"],
+        ],
+    )
+
+    # ── 4. Head to Head ───────────────────────────────────────────────────────
+    draws_pct = feats.get("h2h_draws", 0.33)
+    section(
+        "🤝 Head to Head  (posl. 10 vzájemných zápasů)",
+        [
+            [f"{feats.get('h2h_home_wins', 0.5) * 100:.0f}%",  "Výhry",   f"{feats.get('h2h_away_wins', 0.17) * 100:.0f}%"],
+            [f"{draws_pct * 100:.0f}%",                          "Remízy",  f"{draws_pct * 100:.0f}%"],
+            [_fv(feats.get("h2h_home_gf", 1.5)),                "Avg GF",  _fv(feats.get("h2h_away_gf", 1.2))],
+        ],
+    )
 
 
 def get_db() -> SASession:
@@ -310,60 +432,44 @@ with tab_pred:
     if not fixtures:
         st.info("Žádné nadcházející zápasy.")
     else:
-        prob_cols = ["P(H)%", "P(D)%", "P(A)%", "P(O2.5)%", "P(U2.5)%", "P(BTTS)%", "P(1-3g)%", "P(2-4g)%"]
-        df = pd.DataFrame([{
-            "Datum": f["date"][:16].replace("T", " "),
-            "": f.get("home_logo", ""),
-            "Domácí": f["home_team"],
-            " ": f.get("away_logo", ""),
-            "Hosté": f["away_team"],
-            "P(H)%": round(f["prob_home"] * 100, 1),
-            "P(D)%": round(f["prob_draw"] * 100, 1),
-            "P(A)%": round(f["prob_away"] * 100, 1),
-            "P(O2.5)%": round(f["over2_5"] * 100, 1),
-            "P(U2.5)%": round(f["under2_5"] * 100, 1),
-            "P(BTTS)%": round(f["btts_yes"] * 100, 1),
-            "P(1-3g)%": round(f["goals1_3"] * 100, 1),
-            "P(2-4g)%": round(f["goals2_4"] * 100, 1),
-        } for f in fixtures])
+        with st.spinner("Načítám statistiky..."):
+            features_by_id, league_avg = get_league_features(league)
 
-        def highlight_high(val):
-            if isinstance(val, float) and val >= 65:
-                return "background-color: #1a6e3c; color: white; font-weight: bold"
-            return ""
+        for fx in fixtures:
+            home = fx["home_team"]
+            away = fx["away_team"]
+            date_str = fx["date"][:16].replace("T", " ")
+            h_pct = fx["prob_home"] * 100
+            d_pct = fx["prob_draw"] * 100
+            a_pct = fx["prob_away"] * 100
+            o25_pct = fx["over2_5"] * 100
+            header = (
+                f"📅 {date_str}  ·  {home} vs {away}"
+                f"  ·  1: {h_pct:.0f}%  X: {d_pct:.0f}%  2: {a_pct:.0f}%  ·  O2.5: {o25_pct:.0f}%"
+            )
 
-        styled = df.style.applymap(highlight_high, subset=prob_cols).format(
-            {col: "{:.1f}" for col in prob_cols}
-        )
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "": st.column_config.ImageColumn("", width="small"),
-                " ": st.column_config.ImageColumn(" ", width="small"),
-            },
-        )
+            with st.expander(header):
+                feats = features_by_id.get(fx["fixture_id"], {})
+                render_match_detail(fx, feats, league_avg)
 
-        st.divider()
-        st.subheader("Přidat ke sledování")
-
-        match_options = {
-            f"{f['home_team']} vs {f['away_team']} ({f['date'][:10]})": f
-            for f in fixtures
-        }
-        selected_match_label = st.selectbox("Vyber zápas", options=list(match_options.keys()), key="sel_match")
-        selected_pred_type = st.selectbox("Typ predikce", options=PREDICTION_TYPES, key="sel_type")
-
-        if st.button("Přidat ke sledování", key="add_track"):
-            chosen = match_options[selected_match_label]
-            result = save_tracking(chosen, league, selected_pred_type, None)
-            if result == "ok":
-                st.success("Predikce přidána ke sledování.")
-            elif result == "duplicate":
-                st.warning("Tato predikce je již sledována.")
-            else:
-                st.error("Chyba při ukládání.")
+                st.divider()
+                tr_col1, tr_col2 = st.columns([3, 1])
+                with tr_col1:
+                    track_type = st.selectbox(
+                        "Typ predikce ke sledování",
+                        PREDICTION_TYPES,
+                        key=f"track_type_{fx['fixture_id']}",
+                    )
+                with tr_col2:
+                    st.write("")
+                    if st.button("📌 Sledovat", key=f"track_btn_{fx['fixture_id']}"):
+                        result = save_tracking(fx, league, track_type, None)
+                        if result == "ok":
+                            st.success("Přidáno ke sledování.")
+                        elif result == "duplicate":
+                            st.warning("Již sledováno.")
+                        else:
+                            st.error("Chyba při ukládání.")
 
 
 # ── TAB 2: Sledované predikce ──────────────────────────────────────────────────

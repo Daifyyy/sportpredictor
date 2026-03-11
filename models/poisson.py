@@ -32,7 +32,12 @@ class DixonColesPredictor(BasePredictor):
         if x == 1 and y == 1: return 1 - rho
         return 1.0
 
-    def train(self, fixtures: List[Fixture]) -> None:
+    def train(
+        self,
+        fixtures: List[Fixture],
+        attack_prior: Dict[int, float] = None,
+        defence_prior: Dict[int, float] = None,
+    ) -> None:
         completed = [f for f in fixtures if f.result is not None]
         teams = list({f.home_team.id for f in completed} | {f.away_team.id for f in completed})
         team_idx = {t: i for i, t in enumerate(teams)}
@@ -71,7 +76,17 @@ class DixonColesPredictor(BasePredictor):
             ll -= np.log(tau).sum()
             return ll
 
+        # Starting point: use domestic league priors where available, zeros otherwise.
+        # Teams with few cup matches inherit domestic strength; cup data only fine-tunes.
         x0 = np.zeros(2 * n + 2)
+        if attack_prior:
+            for i, team_id in enumerate(teams):
+                if team_id in attack_prior:
+                    x0[i] = attack_prior[team_id]
+        if defence_prior:
+            for i, team_id in enumerate(teams):
+                if team_id in defence_prior:
+                    x0[n + i] = defence_prior[team_id]
         x0[2 * n]     = self.home_advantage
         x0[2 * n + 1] = -0.13
         bounds = [(None, None)] * (2 * n + 1) + [(-0.99, 0.99)]

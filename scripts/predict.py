@@ -18,7 +18,7 @@ from config.settings import settings
 from data.fetcher import FootballFetcher
 from db.models import Base, FixturePrediction
 from db.session import SessionLocal, engine
-from models.ensemble import EnsembleDCPredictor
+from models.ensemble import CUP_LEAGUES, EnsembleDCPredictor
 from models.poisson import DixonColesPredictor
 
 MODELS_DIR = Path("models/saved")
@@ -44,16 +44,27 @@ def compute_goal_probs(lam: float, mu: float) -> dict:
     }
 
 
-def train_ensemble(completed, cfg, league_key: str = "") -> EnsembleDCPredictor | None:
+def train_ensemble(
+    completed,
+    cfg,
+    league_key: str = "",
+    attack_prior: dict = None,
+    defence_prior: dict = None,
+) -> EnsembleDCPredictor | None:
     if len(completed) < 50:
         print(f"  Not enough data ({len(completed)} matches), skipping.")
         return None
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+    using_prior = bool(attack_prior)
+    if using_prior:
+        covered = sum(1 for f in completed if f.home_team.id in attack_prior or f.away_team.id in attack_prior)
+        print(f"  Using domestic prior — {len(attack_prior)} teams in prior, {covered}/{len(completed)*2} appearances covered")
+
     # dc_all
     dc_all = DixonColesPredictor()
-    dc_all.train(completed)
+    dc_all.train(completed, attack_prior=attack_prior, defence_prior=defence_prior)
     dc_all.save(MODELS_DIR / f"dc_all_{cfg.name.lower().replace(' ', '_')}.joblib")
     print(f"  dc_all trained on {len(completed)} matches")
 
@@ -61,7 +72,7 @@ def train_ensemble(completed, cfg, league_key: str = "") -> EnsembleDCPredictor 
     season_fixtures = [f for f in completed if f.season == cfg.season]
     if len(season_fixtures) >= 30:
         dc_season = DixonColesPredictor()
-        dc_season.train(season_fixtures)
+        dc_season.train(season_fixtures, attack_prior=attack_prior, defence_prior=defence_prior)
         dc_season.save(MODELS_DIR / f"dc_season_{cfg.name.lower().replace(' ', '_')}.joblib")
         print(f"  dc_season trained on {len(season_fixtures)} matches")
     else:
@@ -73,7 +84,7 @@ def train_ensemble(completed, cfg, league_key: str = "") -> EnsembleDCPredictor 
     recent_fixtures = [f for f in completed if f.date >= cutoff]
     if len(recent_fixtures) >= 30:
         dc_recent = DixonColesPredictor()
-        dc_recent.train(recent_fixtures)
+        dc_recent.train(recent_fixtures, attack_prior=attack_prior, defence_prior=defence_prior)
         print(f"  dc_recent trained on {len(recent_fixtures)} matches (last 60 days)")
     else:
         dc_recent = None
@@ -89,21 +100,54 @@ def main():
     db = SessionLocal()
 
     try:
-        for league_key, cfg in settings.leagues.items():
-            print(f"\n[{cfg.name}]")
+        # Phase 1: train domestic leagues, collect attack/defence parameters as cup priors
+        domestic_attack: dict = {}
+        domestic_defence: dict = {}
+        domestic_results: dict = {}  # league_key -> (completed, model)
 
+        for league_key, cfg in settings.leagues.items():
+            if league_key in CUP_LEAGUES:
+                continue
+            print(f"\n[{cfg.name}]")
             history = fetcher.get_fixtures(cfg, status="FT")
             completed = [f for f in history if f.result is not None]
             model = train_ensemble(completed, cfg, league_key=league_key)
             if model is None:
                 continue
+            domestic_results[league_key] = (completed, model)
+            # Merge team parameters into global prior dicts (team IDs are unique across API-Football)
+            domestic_attack.update(model.dc_all.attack)
+            domestic_defence.update(model.dc_all.defence)
 
+        print(f"\n[Prior] Collected {len(domestic_attack)} teams from domestic leagues")
+
+        # Phase 2: cup leagues — use domestic priors as MLE starting point
+        cup_results: dict = {}
+        for league_key, cfg in settings.leagues.items():
+            if league_key not in CUP_LEAGUES:
+                continue
+            print(f"\n[{cfg.name}]")
+            history = fetcher.get_fixtures(cfg, status="FT")
+            completed = [f for f in history if f.result is not None]
+            model = train_ensemble(
+                completed, cfg, league_key=league_key,
+                attack_prior=domestic_attack,
+                defence_prior=domestic_defence,
+            )
+            if model is None:
+                continue
+            cup_results[league_key] = (completed, model)
+
+        # Save predictions for all leagues
+        all_results = {**domestic_results, **cup_results}
+        for league_key, (completed, model) in all_results.items():
+            cfg = settings.leagues[league_key]
             upcoming = fetcher.get_upcoming_fixtures(cfg, next_n=10)
             if not upcoming:
-                print("  No upcoming fixtures found.")
+                print(f"\n[{cfg.name}] No upcoming fixtures found.")
                 continue
 
-            print(f"  Computing predictions for {len(upcoming)} upcoming fixtures...")
+            print(f"\n[{cfg.name}] Computing predictions for {len(upcoming)} upcoming fixtures...")
 
             # Delete stale rows for this league
             db.query(FixturePrediction).filter(FixturePrediction.league == league_key).delete()

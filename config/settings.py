@@ -55,10 +55,10 @@ class Settings:
         "bundesliga":        LeagueConfig(78,  "Bundesliga",          "Germany",      season=2025, seasons=(2022, 2023, 2024, 2025)),
         "serie_a":           LeagueConfig(135, "Serie A",             "Italy",        season=2025, seasons=(2022, 2023, 2024, 2025)),
         "ligue_1":           LeagueConfig(61,  "Ligue 1",             "France",       season=2025, seasons=(2022, 2023, 2024, 2025)),
-        "czech_liga":        LeagueConfig(345, "Fortuna Liga",        "Czech Republic", season=2024, seasons=(2022, 2023, 2024)),
-        "champions_league":  LeagueConfig(2,   "Champions League",   "Europe",       season=2024, seasons=(2022, 2023, 2024)),
-        "europa_league":     LeagueConfig(3,   "Europa League",      "Europe",       season=2024, seasons=(2022, 2023, 2024)),
-        "conference_league": LeagueConfig(848, "Conference League",  "Europe",       season=2024, seasons=(2022, 2023, 2024)),
+        "czech_liga":        LeagueConfig(345, "Fortuna Liga",        "Czech Republic", season=2025, seasons=(2022, 2023, 2024, 2025)),
+        "champions_league":  LeagueConfig(2,   "Champions League",   "Europe",       season=2025, seasons=(2022, 2023, 2024, 2025)),
+        "europa_league":     LeagueConfig(3,   "Europa League",      "Europe",       season=2025, seasons=(2022, 2023, 2024, 2025)),
+        "conference_league": LeagueConfig(848, "Conference League",  "Europe",       season=2025, seasons=(2022, 2023, 2024, 2025)),
     })
 
 
