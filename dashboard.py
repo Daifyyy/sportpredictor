@@ -612,18 +612,6 @@ with tab_pred:
             has_injuries = bool(inj_data.get("home") or inj_data.get("away"))
             label = f"📅 {date_str}  ·  {home} vs {away}" + ("  🚑" if has_injuries else "")
             with st.expander(label):
-                # ── Goal markets (přesun z tabulky do detailu) ──────────────
-                st.caption("📈 Trhy")
-                mc1, mc2, mc3 = st.columns(3)
-                mc1.metric("Over 2.5",  f"{fx.get('over2_5', 0)*100:.0f}%")
-                mc2.metric("BTTS",      f"{fx.get('btts_yes', 0)*100:.0f}%")
-                mc3.metric("1–3 gólů",  f"{fx.get('goals1_3', 0)*100:.0f}%")
-                mc4, mc5, mc6 = st.columns(3)
-                mc4.metric("Under 2.5", f"{fx.get('under2_5', 0)*100:.0f}%")
-                mc5.metric("No BTTS",   f"{fx.get('btts_no', 0)*100:.0f}%")
-                mc6.metric("2–4 gólů",  f"{fx.get('goals2_4', 0)*100:.0f}%")
-
-                st.divider()
                 feats = features_by_id.get(fx["fixture_id"], {})
                 render_match_detail(fx, feats, league_avg)
 
