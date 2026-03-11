@@ -110,9 +110,6 @@ def get_league_features(league_key: str) -> tuple[dict, dict]:
     if len(completed) < 20 or not upcoming:
         return {}, {}
 
-    # Enrich with match statistics (shots, corners, xG) — TTL=-1, cached after first fetch
-    fetcher.enrich_with_statistics(completed)
-
     fe = FeatureEngineer()
     fe.precompute(completed)
     features_by_id = {fx.id: fe.build_features(fx, completed) for fx in upcoming}
