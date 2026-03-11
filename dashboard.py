@@ -123,7 +123,6 @@ def get_league_features(league_key: str) -> tuple[dict, dict]:
 
 
 def _fv(val, fmt=".2f") -> str:
-    """Format a numeric feature value; return '—' for missing/zero defaults."""
     if isinstance(val, (int, float)):
         try:
             return f"{val:{fmt}}"
@@ -133,87 +132,61 @@ def _fv(val, fmt=".2f") -> str:
 
 
 def render_match_detail(fx_data: dict, feats: dict, league_avg: dict) -> None:
+    if not feats:
+        st.caption("Statistiky nejsou k dispozici (nedostatek dat).")
+        return
+
     home = fx_data["home_team"]
     away = fx_data["away_team"]
     avg_gf = league_avg.get("avg_gf", 1.4)
     avg_pts = league_avg.get("avg_pts", 1.2)
 
-    # Probability summary
-    pc1, pc2, pc3, pc4, pc5 = st.columns(5)
-    pc1.metric(f"1 — {home[:14]}", f"{fx_data['prob_home'] * 100:.1f}%")
-    pc2.metric("X — Remíza", f"{fx_data['prob_draw'] * 100:.1f}%")
-    pc3.metric(f"2 — {away[:14]}", f"{fx_data['prob_away'] * 100:.1f}%")
-    pc4.metric("Over 2.5", f"{fx_data['over2_5'] * 100:.1f}%")
-    pc5.metric("BTTS Ano", f"{fx_data['btts_yes'] * 100:.1f}%")
+    H = f"🏠 {home}"
+    A = f"✈️ {away}"
 
-    if not feats:
-        st.caption("Statistiky nejsou k dispozici (nedostatek dat).")
-        return
+    def tbl(caption: str, rows: list) -> None:
+        st.caption(caption)
+        st.dataframe(
+            pd.DataFrame(rows, columns=[H, "Statistika", A]),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    st.divider()
-
-    HDR = "Statistika"
-    H_COL = f"🏠 {home}"
-    A_COL = f"✈ {away}"
-
-    def section(title: str, rows: list[list]) -> None:
-        st.markdown(f"**{title}**")
-        df = pd.DataFrame(rows, columns=[H_COL, HDR, A_COL])
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-    # ── 1. Forma & Útok/Obrana ────────────────────────────────────────────────
-    section(
-        f"⚡ Forma & Útok/Obrana  (posl. 5 zápasů · liga ø GF: {avg_gf:.2f} | Pts/z: {avg_pts:.2f})",
-        [
-            [_fv(feats.get("home_form", 0)),          "Pts/zápas (celková forma)",  _fv(feats.get("away_form", 0))],
-            [_fv(feats.get("home_gf", 0)),             f"GF/zápas  (liga ø {avg_gf:.2f})", _fv(feats.get("away_gf", 0))],
-            [_fv(feats.get("home_ga", 0)),             f"GA/zápas  (liga ø {avg_gf:.2f})", _fv(feats.get("away_ga", 0))],
-            [_fv(feats.get("home_attack_str", 1)),     "Útočná síla (vs liga = 1.0)",  _fv(feats.get("away_attack_str", 1))],
-            [_fv(feats.get("home_defense_str", 1)),    "Obranná síla (vs liga = 1.0)", _fv(feats.get("away_defense_str", 1))],
-            [_fv(feats.get("home_gf_std", 0)),         "Konzistence GF (std)",         _fv(feats.get("away_gf_std", 0))],
-            [_fv(feats.get("home_ga_std", 0)),         "Konzistence GA (std)",         _fv(feats.get("away_ga_std", 0))],
-        ],
-    )
-
-    # ── 2. Domácí / Venkovní forma ─────────────────────────────────────────────
-    section(
-        "🏠 Domácí / ✈ Venkovní forma  (posl. 5 zápasů na hřišti / venku)",
-        [
-            [_fv(feats.get("home_venue_form", 0)),  "Pts/zápas (venue)",   _fv(feats.get("away_venue_form", 0))],
-            [_fv(feats.get("home_venue_gf", 0)),    "GF/zápas (venue)",    _fv(feats.get("away_venue_gf", 0))],
-            [_fv(feats.get("home_venue_ga", 0)),    "GA/zápas (venue)",    _fv(feats.get("away_venue_ga", 0))],
-        ],
-    )
-
-    # ── 3. Sezóna, Trend & Elo ────────────────────────────────────────────────
     streak_h = feats.get("home_streak", 0)
     streak_a = feats.get("away_streak", 0)
-    section(
-        "📅 Sezóna · Trend · Elo",
-        [
-            [_fv(feats.get("home_season_ppg", 0)),  f"PPG sezóna  (liga ø {avg_pts:.2f})",  _fv(feats.get("away_season_ppg", 0))],
-            [_fv(feats.get("home_form_short", 0)),  "Forma krátká (posl. 3)",               _fv(feats.get("away_form_short", 0))],
-            [_fv(feats.get("home_trend", 0), "+.2f"), "Trend (krátká − dlouhá)",            _fv(feats.get("away_trend", 0), "+.2f")],
-            [f"{streak_h:+.0f}" if isinstance(streak_h, (int, float)) else "—",
-             "Aktuální série (W=+, L=−)",
-             f"{streak_a:+.0f}" if isinstance(streak_a, (int, float)) else "—"],
-            [_fv(feats.get("elo_home", 1500), ".0f"), "Elo rating",                        _fv(feats.get("elo_away", 1500), ".0f")],
-            [_fv(feats.get("home_rest_days", 7), ".0f") + " dní",
-             "Dní od posledního zápasu",
-             _fv(feats.get("away_rest_days", 7), ".0f") + " dní"],
-        ],
-    )
 
-    # ── 4. Head to Head ───────────────────────────────────────────────────────
+    tbl("⚡ Forma (posl. 5 zápasů)", [
+        [_fv(feats.get("home_form")),          f"Pts/zápas  ·  ø {avg_pts:.2f}",   _fv(feats.get("away_form"))],
+        [_fv(feats.get("home_gf")),             f"GF/zápas  ·  ø {avg_gf:.2f}",    _fv(feats.get("away_gf"))],
+        [_fv(feats.get("home_ga")),             f"GA/zápas  ·  ø {avg_gf:.2f}",    _fv(feats.get("away_ga"))],
+        [_fv(feats.get("home_attack_str")),     "Útočná síla  ·  ø 1.00",           _fv(feats.get("away_attack_str"))],
+        [_fv(feats.get("home_defense_str")),    "Obranná síla  ·  ø 1.00",          _fv(feats.get("away_defense_str"))],
+    ])
+
+    tbl("🏠 Domácí / ✈️ Venkovní forma (posl. 5 zápasů na vlastním hřišti / venku)", [
+        [_fv(feats.get("home_venue_form")),  f"Pts/zápas  ·  ø {avg_pts:.2f}",  _fv(feats.get("away_venue_form"))],
+        [_fv(feats.get("home_venue_gf")),    f"GF/zápas  ·  ø {avg_gf:.2f}",   _fv(feats.get("away_venue_gf"))],
+        [_fv(feats.get("home_venue_ga")),    f"GA/zápas  ·  ø {avg_gf:.2f}",   _fv(feats.get("away_venue_ga"))],
+    ])
+
+    tbl("📅 Sezóna · Trend · Elo", [
+        [_fv(feats.get("home_season_ppg")),   f"PPG sezóna  ·  ø {avg_pts:.2f}",  _fv(feats.get("away_season_ppg"))],
+        [_fv(feats.get("home_form_short")),   "Forma (posl. 3 zápasy)",            _fv(feats.get("away_form_short"))],
+        [_fv(feats.get("home_trend"), "+.2f"), "Trend (krátká − dlouhá forma)",   _fv(feats.get("away_trend"), "+.2f")],
+        [f"{streak_h:+.0f}" if isinstance(streak_h, (int, float)) else "—",
+         "Aktuální série  (W = +, L = −)",
+         f"{streak_a:+.0f}" if isinstance(streak_a, (int, float)) else "—"],
+        [_fv(feats.get("elo_home", 1500), ".0f"),  "Elo rating  ·  ø 1500",  _fv(feats.get("elo_away", 1500), ".0f")],
+        [f"{feats.get('home_rest_days', 7):.0f} dní", "Odpočinek od posl. zápasu",
+         f"{feats.get('away_rest_days', 7):.0f} dní"],
+    ])
+
     draws_pct = feats.get("h2h_draws", 0.33)
-    section(
-        "🤝 Head to Head  (posl. 10 vzájemných zápasů)",
-        [
-            [f"{feats.get('h2h_home_wins', 0.5) * 100:.0f}%",  "Výhry",   f"{feats.get('h2h_away_wins', 0.17) * 100:.0f}%"],
-            [f"{draws_pct * 100:.0f}%",                          "Remízy",  f"{draws_pct * 100:.0f}%"],
-            [_fv(feats.get("h2h_home_gf", 1.5)),                "Avg GF",  _fv(feats.get("h2h_away_gf", 1.2))],
-        ],
-    )
+    tbl("🤝 Head to Head (posl. 10 vzájemných zápasů)", [
+        [f"{feats.get('h2h_home_wins', 0.5) * 100:.0f} %",  "Výhry",              f"{feats.get('h2h_away_wins', 0.17) * 100:.0f} %"],
+        [f"{draws_pct * 100:.0f} %",                          "Remízy  ·  (shodně)", f"{draws_pct * 100:.0f} %"],
+        [_fv(feats.get("h2h_home_gf", 1.5)),                  f"Avg GF  ·  ø {avg_gf:.2f}", _fv(feats.get("h2h_away_gf", 1.2))],
+    ])
 
 
 def get_db() -> SASession:
@@ -432,6 +405,44 @@ with tab_pred:
     if not fixtures:
         st.info("Žádné nadcházející zápasy.")
     else:
+        # ── Původní přehledová tabulka ──────────────────────────────────────
+        prob_cols = ["P(H)%", "P(D)%", "P(A)%", "P(O2.5)%", "P(U2.5)%", "P(BTTS)%", "P(1-3g)%", "P(2-4g)%"]
+        df = pd.DataFrame([{
+            "Datum": f["date"][:16].replace("T", " "),
+            "": f.get("home_logo", ""),
+            "Domácí": f["home_team"],
+            " ": f.get("away_logo", ""),
+            "Hosté": f["away_team"],
+            "P(H)%": round(f["prob_home"] * 100, 1),
+            "P(D)%": round(f["prob_draw"] * 100, 1),
+            "P(A)%": round(f["prob_away"] * 100, 1),
+            "P(O2.5)%": round(f["over2_5"] * 100, 1),
+            "P(U2.5)%": round(f["under2_5"] * 100, 1),
+            "P(BTTS)%": round(f["btts_yes"] * 100, 1),
+            "P(1-3g)%": round(f["goals1_3"] * 100, 1),
+            "P(2-4g)%": round(f["goals2_4"] * 100, 1),
+        } for f in fixtures])
+
+        def highlight_high(val):
+            if isinstance(val, float) and val >= 65:
+                return "background-color: #1a6e3c; color: white; font-weight: bold"
+            return ""
+
+        styled = df.style.applymap(highlight_high, subset=prob_cols).format(
+            {col: "{:.1f}" for col in prob_cols}
+        )
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "": st.column_config.ImageColumn("", width="small"),
+                " ": st.column_config.ImageColumn(" ", width="small"),
+            },
+        )
+
+        # ── Detailní analýza (expandery) ────────────────────────────────────
+        st.subheader("Detailní analýza")
         with st.spinner("Načítám statistiky..."):
             features_by_id, league_avg = get_league_features(league)
 
@@ -439,16 +450,7 @@ with tab_pred:
             home = fx["home_team"]
             away = fx["away_team"]
             date_str = fx["date"][:16].replace("T", " ")
-            h_pct = fx["prob_home"] * 100
-            d_pct = fx["prob_draw"] * 100
-            a_pct = fx["prob_away"] * 100
-            o25_pct = fx["over2_5"] * 100
-            header = (
-                f"📅 {date_str}  ·  {home} vs {away}"
-                f"  ·  1: {h_pct:.0f}%  X: {d_pct:.0f}%  2: {a_pct:.0f}%  ·  O2.5: {o25_pct:.0f}%"
-            )
-
-            with st.expander(header):
+            with st.expander(f"📅 {date_str}  ·  {home} vs {away}"):
                 feats = features_by_id.get(fx["fixture_id"], {})
                 render_match_detail(fx, feats, league_avg)
 
