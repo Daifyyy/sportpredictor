@@ -2,6 +2,7 @@
 Standalone resolve script for GitHub Actions.
 Fetches results for all pending tracked_predictions and updates the DB.
 """
+import logging
 import sys
 import os
 
@@ -9,6 +10,13 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime, timedelta, timezone
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 from api.client import APIClient
 from config.settings import settings
@@ -61,7 +69,7 @@ def main():
         results_by_id: dict[int, tuple[int, int]] = {}
 
         for fid in fixture_ids:
-            data = client.get("fixtures", {"id": fid}, ttl=3600)
+            data = client.get("fixtures", {"id": fid}, ttl=settings.cache_ttl.fixtures)
             if not data:
                 print(f"No data for fixture {fid}")
                 continue

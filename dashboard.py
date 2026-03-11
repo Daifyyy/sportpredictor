@@ -20,10 +20,12 @@ from db.models import Base, FixturePrediction, ResolvedFixturePrediction, Tracke
 from db.session import engine
 from features.engineer import FeatureEngineer
 from models.ensemble import EnsembleDCPredictor
+from models.injury import InjuryAdjuster
 from models.poisson import DixonColesPredictor
 
 MODELS_DIR = Path("models/saved")
 PREDICTION_TYPES = ["H", "D", "A", "Under2.5", "Over2.5", "Goals1-3", "Goals2-4", "BTTS_Yes", "BTTS_No"]
+_injury_adjuster = InjuryAdjuster()
 
 flags = {"England": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Spain": "🇪🇸", "Germany": "🇩🇪", "Italy": "🇮🇹", "France": "🇫🇷", "Czech Republic": "🇨🇿", "Europe": "🇪🇺"}
 leagues_display = {
@@ -108,6 +110,9 @@ def get_league_features(league_key: str) -> tuple[dict, dict]:
     if len(completed) < 20 or not upcoming:
         return {}, {}
 
+    # Enrich with match statistics (shots, corners, xG) — TTL=-1, cached after first fetch
+    fetcher.enrich_with_statistics(completed)
+
     fe = FeatureEngineer()
     fe.precompute(completed)
     features_by_id = {fx.id: fe.build_features(fx, completed) for fx in upcoming}
@@ -121,6 +126,29 @@ def get_league_features(league_key: str) -> tuple[dict, dict]:
         "avg_pts": round((3 * wins + 2 * draws) / (2 * n), 2),
     }
     return features_by_id, league_avg
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_league_injuries(league_key: str) -> dict:
+    """Returns {fixture_id: {home, away, home_goals, away_goals}} for all upcoming fixtures."""
+    fetcher = get_fetcher()
+    cfg = settings.leagues[league_key]
+    upcoming = fetcher.get_upcoming_fixtures(cfg, next_n=10)
+    result = {}
+    for fx in upcoming:
+        try:
+            home_inj, away_inj, home_goals, away_goals = fetcher.get_fixture_injuries(
+                fx, cfg.id, cfg.season
+            )
+        except Exception:
+            home_inj, away_inj, home_goals, away_goals = [], [], 50, 50
+        result[fx.id] = {
+            "home": home_inj,
+            "away": away_inj,
+            "home_goals": home_goals,
+            "away_goals": away_goals,
+        }
+    return result
 
 
 def _fv(val, fmt=".2f") -> str:
@@ -141,6 +169,15 @@ def render_match_detail(fx_data: dict, feats: dict, league_avg: dict) -> None:
     away = fx_data["away_team"]
     avg_gf = league_avg.get("avg_gf", 1.4)
     avg_pts = league_avg.get("avg_pts", 1.2)
+
+    # ── Expected goals (λ/μ) — model's raw scoring rate estimates ──────────────
+    lam = fx_data.get("expected_goals_home")
+    mu  = fx_data.get("expected_goals_away")
+    if lam is not None and mu is not None:
+        eg_col1, eg_col2, eg_col3 = st.columns(3)
+        eg_col1.metric(f"λ  ({home})", f"{lam:.2f}", help="Očekávaný počet gólů domácích (model)")
+        eg_col2.metric("Celkem gólů (model)", f"{lam + mu:.2f}", help="λ + μ = celkový očekávaný počet gólů v zápase")
+        eg_col3.metric(f"μ  ({away})", f"{mu:.2f}", help="Očekávaný počet gólů hostů (model)")
 
     H = f"🏠 {home}"
     A = f"✈️ {away}"
@@ -188,6 +225,75 @@ def render_match_detail(fx_data: dict, feats: dict, league_avg: dict) -> None:
         [f"{draws_pct * 100:.0f} %",                          "Remízy  ·  (shodně)", f"{draws_pct * 100:.0f} %"],
         [_fv(feats.get("h2h_home_gf", 1.5)),                  f"Avg GF  ·  ø {avg_gf:.2f}", _fv(feats.get("h2h_away_gf", 1.2))],
     ])
+
+    # ── Zápasové statistiky (jen pokud jsou data — velké ligy s fixture/statistics) ──
+    has_shots = feats.get("home_avg_shots_on_target") is not None
+    has_xg    = feats.get("home_avg_xg") is not None
+    if has_shots or has_xg:
+        stats_rows = []
+        if has_shots:
+            stats_rows += [
+                [_fv(feats.get("home_avg_shots_on_target")), "Střely na bránu / zápas (posl. 5)",  _fv(feats.get("away_avg_shots_on_target"))],
+                [_fv(feats.get("home_avg_total_shots")),     "Celkové střely / zápas (posl. 5)",   _fv(feats.get("away_avg_total_shots"))],
+                [_fv(feats.get("home_avg_corners")),         "Rohy / zápas (posl. 5)",             _fv(feats.get("away_avg_corners"))],
+            ]
+        if has_xg:
+            stats_rows.append(
+                [_fv(feats.get("home_avg_xg")), "xG / zápas (posl. 5)  ·  model očekávaná kvalita šancí", _fv(feats.get("away_avg_xg"))]
+            )
+        tbl("📊 Zápasové statistiky (průměr posl. 5 zápasů)", stats_rows)
+
+
+_POS_CZ = {
+    "Attacker":   "Útočník",
+    "Midfielder": "Záložník",
+    "Defender":   "Obránce",
+    "Goalkeeper": "Brankář",
+}
+_STATUS_ICON = {"Missing": "🔴", "Questionable": "🟡"}
+
+
+def render_injuries(
+    home_name: str, away_name: str,
+    home_injuries: list, away_injuries: list,
+    home_goals: int, away_goals: int,
+) -> None:
+    """Render injured/suspended player lists with per-player impact estimate."""
+    if not home_injuries and not away_injuries:
+        return
+
+    st.caption("🚑 Zranění a absence")
+
+    def fmt_player(inj, team_goals: int) -> str:
+        icon = _STATUS_ICON.get(inj.status, "🔴")
+        pos  = _POS_CZ.get(inj.position, inj.position)
+        atk, dfn = _injury_adjuster.player_impact(inj, team_goals)
+        impact = atk or dfn
+
+        if inj.position in ("Attacker", "Midfielder"):
+            stat_str = f"{inj.goals}G {inj.assists}A"
+        else:
+            stat_str = f"{inj.minutes} min"
+
+        impact_str = f" · **−{impact*100:.0f}% λ**" if impact >= 0.01 else ""
+        status_str = "Chybí" if inj.status == "Missing" else "Pochybný"
+        return f"{icon} {inj.player_name} *({pos})* · {stat_str}{impact_str} · {status_str}"
+
+    col_h, col_a = st.columns(2)
+    with col_h:
+        st.markdown(f"**🏠 {home_name}**")
+        if home_injuries:
+            for inj in home_injuries:
+                st.markdown(fmt_player(inj, home_goals))
+        else:
+            st.caption("Žádná hlášená zranění")
+    with col_a:
+        st.markdown(f"**✈️ {away_name}**")
+        if away_injuries:
+            for inj in away_injuries:
+                st.markdown(fmt_player(inj, away_goals))
+        else:
+            st.caption("Žádná hlášená zranění")
 
 
 def get_db() -> SASession:
@@ -315,9 +421,49 @@ def save_tracking(fixture: dict, league: str, prediction_type: str, model_prob: 
 Base.metadata.create_all(engine)
 
 st.set_page_config(page_title="Football Tracker", page_icon="⚽", layout="wide")
-st.title("⚽ Football Prediction Tracker")
 
-tab_pred, tab_tracked, tab_results, tab_stats = st.tabs(["📅 Predikce", "📋 Sledované predikce", "🔍 Výsledky", "📊 Statistiky"])
+# ── Mobile-first CSS ────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* Tighter padding — more usable width on small screens */
+.block-container {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+    padding-top: 1rem !important;
+    max-width: 100% !important;
+}
+/* Touch targets: Apple HIG ≥ 44px */
+button[kind="secondary"], button[kind="primary"], [data-testid="baseButton-secondary"] {
+    min-height: 44px !important;
+}
+/* Selectbox touch-friendly height */
+[data-testid="stSelectbox"] > div > div {
+    min-height: 44px !important;
+}
+/* Tabs — prevent label overflow on narrow screens */
+[data-testid="stTabs"] [role="tab"] {
+    padding-left: 0.5rem !important;
+    padding-right: 0.5rem !important;
+}
+[data-testid="stTabs"] [role="tab"] p {
+    font-size: 13px !important;
+    white-space: nowrap;
+}
+/* Metrics — compact on mobile */
+@media (max-width: 768px) {
+    [data-testid="stMetricValue"] { font-size: 1.3rem !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.75rem !important; }
+    /* Stack injury columns vertically on very small screens */
+    [data-testid="stHorizontalBlock"] > div { min-width: 140px; }
+}
+/* Dataframe horizontal scroll on mobile */
+[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("⚽ Football Tracker")
+
+tab_pred, tab_tracked, tab_results, tab_stats = st.tabs(["📅 Predikce", "📋 Sledované", "🔍 Výsledky", "📊 Statistiky"])
 
 
 # ── TAB 1: Predikce ────────────────────────────────────────────────────────────
@@ -367,6 +513,8 @@ with tab_pred:
                 "goals2_4": r.goals2_4,
                 "btts_yes": r.btts_yes,
                 "btts_no": r.btts_no,
+                "expected_goals_home": getattr(r, "expected_goals_home", None),
+                "expected_goals_away": getattr(r, "expected_goals_away", None),
             } for r in rows]
             st.session_state["upcoming_data"] = data
             st.session_state["upcoming_league"] = league
@@ -406,22 +554,16 @@ with tab_pred:
     if not fixtures:
         st.info("Žádné nadcházející zápasy.")
     else:
-        # ── Původní přehledová tabulka ──────────────────────────────────────
-        prob_cols = ["P(H)%", "P(D)%", "P(A)%", "P(O2.5)%", "P(U2.5)%", "P(BTTS)%", "P(1-3g)%", "P(2-4g)%"]
+        # ── Přehledová tabulka (mobile-first: jen 1X2 pravděpodobnosti) ────────
+        # Goal markets (O2.5, U2.5, BTTS…) jsou v detailu každého zápasu níže.
+        prob_cols = ["H%", "D%", "A%"]
         df = pd.DataFrame([{
-            "Datum": f["date"][:16].replace("T", " "),
-            "": f.get("home_logo", ""),
+            "Datum": f["date"][5:16].replace("T", " "),  # MM-DD HH:MM — kratší pro mobil
             "Domácí": f["home_team"],
-            " ": f.get("away_logo", ""),
             "Hosté": f["away_team"],
-            "P(H)%": round(f["prob_home"] * 100, 1),
-            "P(D)%": round(f["prob_draw"] * 100, 1),
-            "P(A)%": round(f["prob_away"] * 100, 1),
-            "P(O2.5)%": round(f["over2_5"] * 100, 1),
-            "P(U2.5)%": round(f["under2_5"] * 100, 1),
-            "P(BTTS)%": round(f["btts_yes"] * 100, 1),
-            "P(1-3g)%": round(f["goals1_3"] * 100, 1),
-            "P(2-4g)%": round(f["goals2_4"] * 100, 1),
+            "H%": round(f["prob_home"] * 100, 1),
+            "D%": round(f["prob_draw"] * 100, 1),
+            "A%": round(f["prob_away"] * 100, 1),
         } for f in fixtures])
 
         def highlight_high(val):
@@ -432,28 +574,44 @@ with tab_pred:
         styled = df.style.applymap(highlight_high, subset=prob_cols).format(
             {col: "{:.1f}" for col in prob_cols}
         )
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "": st.column_config.ImageColumn("", width="small"),
-                " ": st.column_config.ImageColumn(" ", width="small"),
-            },
-        )
+        st.dataframe(styled, use_container_width=True, hide_index=True)
 
         # ── Detailní analýza (expandery) ────────────────────────────────────
         st.subheader("Detailní analýza")
-        with st.spinner("Načítám statistiky..."):
+        with st.spinner("Načítám statistiky a zranění..."):
             features_by_id, league_avg = get_league_features(league)
+            injuries_by_id = get_league_injuries(league)
 
         for fx in fixtures:
             home = fx["home_team"]
             away = fx["away_team"]
             date_str = fx["date"][:16].replace("T", " ")
-            with st.expander(f"📅 {date_str}  ·  {home} vs {away}"):
+            inj_data = injuries_by_id.get(fx["fixture_id"], {})
+            has_injuries = bool(inj_data.get("home") or inj_data.get("away"))
+            label = f"📅 {date_str}  ·  {home} vs {away}" + ("  🚑" if has_injuries else "")
+            with st.expander(label):
+                # ── Goal markets (přesun z tabulky do detailu) ──────────────
+                st.caption("📈 Trhy")
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("Over 2.5",  f"{fx.get('over2_5', 0)*100:.0f}%")
+                mc2.metric("BTTS",      f"{fx.get('btts_yes', 0)*100:.0f}%")
+                mc3.metric("1–3 gólů",  f"{fx.get('goals1_3', 0)*100:.0f}%")
+                mc4, mc5, mc6 = st.columns(3)
+                mc4.metric("Under 2.5", f"{fx.get('under2_5', 0)*100:.0f}%")
+                mc5.metric("No BTTS",   f"{fx.get('btts_no', 0)*100:.0f}%")
+                mc6.metric("2–4 gólů",  f"{fx.get('goals2_4', 0)*100:.0f}%")
+
+                st.divider()
                 feats = features_by_id.get(fx["fixture_id"], {})
                 render_match_detail(fx, feats, league_avg)
+
+                render_injuries(
+                    home, away,
+                    inj_data.get("home", []),
+                    inj_data.get("away", []),
+                    inj_data.get("home_goals", 50),
+                    inj_data.get("away_goals", 50),
+                )
 
                 st.divider()
                 tr_col1, tr_col2 = st.columns([3, 1])

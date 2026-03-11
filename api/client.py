@@ -56,7 +56,7 @@ class APIClient:
         url = f"{self.settings.base_url}/{endpoint}"
 
         try:
-            response = self.session.get(url, params=params, timeout=10)
+            response = self.session.get(url, params=params, timeout=30)
             response.raise_for_status()
             data = response.json()
 

@@ -146,6 +146,7 @@ class FeatureEngineer:
         features.update(self._consistency(home_matches, home_id, prefix="home"))
         features.update(self._consistency(away_matches, away_id, prefix="away"))
         features.update(self._season_ppg(season_home, season_away, home_id, away_id))
+        features.update(self._stats_features(home_matches, away_matches, home_id, away_id))
         return features
 
     # ── Feature functions (accept pre-filtered matches) ───────────────────────
@@ -297,6 +298,59 @@ class FeatureEngineer:
             f"{prefix}_gf_std": round(float(np.std(gf)), 4),
             f"{prefix}_ga_std": round(float(np.std(ga)), 4),
         }
+
+    def _stats_features(self, home_matches: List[Fixture], away_matches: List[Fixture],
+                        home_id: int, away_id: int) -> Dict:
+        """Rolling average match statistics (shots, corners, xG) from last 5 matches per team."""
+
+        def avg_stats(matches: List[Fixture], team_id: int) -> dict:
+            recent = matches[-5:]
+            shots_on, total_shots, corners, xg_vals = [], [], [], []
+            for f in recent:
+                s = f.home_stats if f.home_team.id == team_id else f.away_stats
+                if s is None:
+                    continue
+                if s.shots_on_target is not None:
+                    shots_on.append(s.shots_on_target)
+                if s.total_shots is not None:
+                    total_shots.append(s.total_shots)
+                if s.corners is not None:
+                    corners.append(s.corners)
+                if s.xg is not None:
+                    xg_vals.append(s.xg)
+            return {
+                "shots_on":    float(np.mean(shots_on))    if shots_on    else None,
+                "total_shots": float(np.mean(total_shots)) if total_shots else None,
+                "corners":     float(np.mean(corners))     if corners     else None,
+                "xg":          float(np.mean(xg_vals))     if xg_vals     else None,
+            }
+
+        h = avg_stats(home_matches, home_id)
+        a = avg_stats(away_matches, away_id)
+
+        features: Dict[str, float] = {}
+
+        if h["shots_on"] is not None and a["shots_on"] is not None:
+            features["home_avg_shots_on_target"] = round(h["shots_on"], 3)
+            features["away_avg_shots_on_target"] = round(a["shots_on"], 3)
+            features["shots_on_target_diff"] = round(h["shots_on"] - a["shots_on"], 3)
+
+        if h["total_shots"] is not None and a["total_shots"] is not None:
+            features["home_avg_total_shots"] = round(h["total_shots"], 3)
+            features["away_avg_total_shots"] = round(a["total_shots"], 3)
+
+        if h["corners"] is not None and a["corners"] is not None:
+            features["home_avg_corners"] = round(h["corners"], 3)
+            features["away_avg_corners"] = round(a["corners"], 3)
+
+        if h["xg"] is not None:
+            features["home_avg_xg"] = round(h["xg"], 3)
+        if a["xg"] is not None:
+            features["away_avg_xg"] = round(a["xg"], 3)
+        if h["xg"] is not None and a["xg"] is not None:
+            features["xg_diff"] = round(h["xg"] - a["xg"], 3)
+
+        return features
 
     def _season_ppg(self, home_season: List[Fixture], away_season: List[Fixture],
                     home_id: int, away_id: int) -> Dict:

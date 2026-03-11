@@ -23,12 +23,12 @@ class LeagueConfig:
 
 @dataclass
 class CacheTTL:
-    fixtures: int = 3600       # 1h
-    standings: int = 3600
-    team_stats: int = 86400    # 24h
+    fixtures: int = 3600       # 1h  — upcoming/current season fixtures
+    team_stats: int = 86400    # 24h — teams/statistics, player season stats (updated after each matchday)
+    injuries: int = 10800      # 3h  — injury reports (updated from press conferences, not real-time)
     odds: int = 900            # 15min
     static: int = 604800       # 7 dní
-    historical: int = -1       # nikdy neexpiruje
+    historical: int = -1       # nikdy neexpiruje — FT match data never changes
 
 
 @dataclass

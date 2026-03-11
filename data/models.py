@@ -24,6 +24,15 @@ class MatchResult:
 
 
 @dataclass
+class FixtureStats:
+    shots_on_target: Optional[int] = None
+    total_shots: Optional[int] = None
+    corners: Optional[int] = None
+    possession: Optional[float] = None  # 0.0–1.0
+    xg: Optional[float] = None          # only available for top leagues (PL, LaLiga, BL)
+
+
+@dataclass
 class Fixture:
     id: int
     date: datetime
@@ -33,6 +42,20 @@ class Fixture:
     away_team: Team
     result: Optional[MatchResult] = None
     status: str = "NS"  # NS, FT, LIVE...
+    home_stats: Optional[FixtureStats] = None
+    away_stats: Optional[FixtureStats] = None
+
+
+@dataclass
+class PlayerInjury:
+    player_id: int
+    player_name: str
+    team_id: int
+    position: str   # "Attacker", "Midfielder", "Defender", "Goalkeeper"
+    status: str     # "Missing" or "Questionable"
+    goals: int = 0
+    assists: int = 0
+    minutes: int = 0
 
 
 @dataclass

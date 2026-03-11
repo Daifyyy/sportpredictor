@@ -27,6 +27,8 @@ class FixturePrediction(Base):
     goals2_4 = Column(Float, nullable=False)
     btts_yes = Column(Float, nullable=False)
     btts_no = Column(Float, nullable=False)
+    expected_goals_home = Column(Float, nullable=True)
+    expected_goals_away = Column(Float, nullable=True)
     computed_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 

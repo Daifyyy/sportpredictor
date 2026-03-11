@@ -4,6 +4,7 @@ Trains ensemble DC model for each league, fetches upcoming fixtures,
 and upserts pre-computed probabilities into fixture_predictions table.
 """
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -17,14 +18,69 @@ from scipy.stats import poisson
 from api.client import APIClient
 from config.settings import settings
 from data.fetcher import FootballFetcher
+from data.models import Prediction
 from db.models import Base, FixturePrediction, ResolvedFixturePrediction
 from db.session import SessionLocal, engine
 from features.engineer import FeatureEngineer
 from models.calibrator import ProbabilityCalibrator
 from models.ensemble import CUP_LEAGUES, EnsembleDCPredictor
+from models.injury import InjuryAdjuster
 from models.poisson import DixonColesPredictor
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 MODELS_DIR = Path("models/saved")
+
+
+def predict_from_lam_mu(fixture_id: int, lam: float, mu: float, rho: float) -> Prediction:
+    """Recompute a Prediction from injury-adjusted λ/μ with DC correction.
+
+    Mirrors EnsembleDCPredictor.predict() but skips model blending — takes
+    final λ/μ directly. goal_probs keys match compute_goal_probs() for consistency.
+    """
+    max_g = 10
+    prob_matrix = np.outer(
+        poisson.pmf(range(max_g), lam),
+        poisson.pmf(range(max_g), mu),
+    )
+    # DC correction for low-score results (0-0, 1-0, 0-1, 1-1)
+    for i in range(2):
+        for j in range(2):
+            prob_matrix[i, j] *= DixonColesPredictor._tau(i, j, lam, mu, rho)
+    prob_matrix /= prob_matrix.sum()
+
+    prob_home = float(np.sum(np.tril(prob_matrix, -1)))
+    prob_draw = float(np.sum(np.diag(prob_matrix)))
+    prob_away = float(np.sum(np.triu(prob_matrix, 1)))
+
+    tg = np.zeros(max_g * 2 - 1)
+    for i in range(max_g):
+        for j in range(max_g):
+            tg[i + j] += prob_matrix[i, j]
+    btts = float(sum(prob_matrix[i, j] for i in range(1, max_g) for j in range(1, max_g)))
+
+    return Prediction(
+        fixture_id=fixture_id,
+        prob_home=prob_home,
+        prob_draw=prob_draw,
+        prob_away=prob_away,
+        model_name="ensemble_dc+injuries",
+        expected_goals_home=lam,
+        expected_goals_away=mu,
+        goal_probs={
+            "over2_5":  round(float(tg[3:].sum()), 4),
+            "under2_5": round(float(tg[:3].sum()), 4),
+            "goals1_3": round(float(tg[1:4].sum()), 4),
+            "goals2_4": round(float(tg[2:5].sum()), 4),
+            "btts_yes": round(btts, 4),
+            "btts_no":  round(1 - btts, 4),
+        },
+    )
 
 
 def compute_goal_probs(lam: float, mu: float) -> dict:
@@ -225,6 +281,8 @@ def main():
     fetcher = FootballFetcher(client, settings)
     db = SessionLocal()
 
+    injury_adjuster = InjuryAdjuster()
+
     try:
         # Phase 1: train domestic leagues, collect attack/defence parameters as cup priors
         domestic_attack: dict = {}
@@ -237,6 +295,7 @@ def main():
             print(f"\n[{cfg.name}]")
             history = fetcher.get_fixtures(cfg, status="FT")
             completed = [f for f in history if f.result is not None]
+            fetcher.enrich_with_statistics(completed)
             model = train_ensemble(completed, cfg, league_key=league_key)
             if model is None:
                 continue
@@ -255,6 +314,7 @@ def main():
             print(f"\n[{cfg.name}]")
             history = fetcher.get_fixtures(cfg, status="FT")
             completed = [f for f in history if f.result is not None]
+            fetcher.enrich_with_statistics(completed)
             model = train_ensemble(
                 completed, cfg, league_key=league_key,
                 attack_prior=domestic_attack,
@@ -299,6 +359,22 @@ def main():
             for fx in upcoming:
                 pred = model.predict(fx)
 
+                # Injury adjustment: fetch injuries, adjust λ/μ, recompute probabilities
+                home_inj, away_inj, home_goals, away_goals = fetcher.get_fixture_injuries(
+                    fx, cfg.id, cfg.season
+                )
+                if home_inj or away_inj:
+                    lam_orig, mu_orig = pred.expected_goals_home, pred.expected_goals_away
+                    lam_adj, mu_adj = injury_adjuster.adjust(
+                        lam_orig, mu_orig, home_inj, away_inj, home_goals, away_goals
+                    )
+                    pred = predict_from_lam_mu(fx.id, lam_adj, mu_adj, model.dc_all.rho)
+                    inj_names = (
+                        [f"{i.player_name}({i.position[0]})" for i in home_inj] +
+                        [f"{i.player_name}({i.position[0]})*" for i in away_inj]
+                    )
+                    print(f"    Injuries: {', '.join(inj_names)} | λ {lam_orig:.2f}→{lam_adj:.2f} μ {mu_orig:.2f}→{mu_adj:.2f}")
+
                 # Apply isotonic calibration if available
                 if cal is not None:
                     ph, pd_val, pa = cal.transform(pred.prob_home, pred.prob_draw, pred.prob_away)
@@ -324,9 +400,11 @@ def main():
                     goals2_4=gp["goals2_4"],
                     btts_yes=gp["btts_yes"],
                     btts_no=gp["btts_no"],
+                    expected_goals_home=round(pred.expected_goals_home, 3),
+                    expected_goals_away=round(pred.expected_goals_away, 3),
                 )
                 db.add(row)
-                print(f"  {fx.home_team.name} vs {fx.away_team.name} | H:{pred.prob_home:.0%} D:{pred.prob_draw:.0%} A:{pred.prob_away:.0%}")
+                print(f"  {fx.home_team.name} vs {fx.away_team.name} | H:{pred.prob_home:.0%} D:{pred.prob_draw:.0%} A:{pred.prob_away:.0%} | λ={pred.expected_goals_home:.2f} μ={pred.expected_goals_away:.2f}")
 
             db.commit()
             print(f"  Saved {len(upcoming)} predictions.")
