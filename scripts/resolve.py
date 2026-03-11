@@ -8,11 +8,11 @@ import os
 # Allow imports from project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from api.client import APIClient
 from config.settings import settings
-from db.models import TrackedPrediction
+from db.models import ResolvedFixturePrediction, TrackedPrediction
 from db.session import SessionLocal
 
 
@@ -93,6 +93,15 @@ def main():
 
         db.commit()
         print(f"Resolved {resolved} predictions.")
+
+        # Clean up resolved_fixture_predictions older than 10 days
+        cutoff = now - timedelta(days=10)
+        deleted = db.query(ResolvedFixturePrediction).filter(
+            ResolvedFixturePrediction.match_date < cutoff
+        ).delete()
+        if deleted:
+            db.commit()
+            print(f"Cleaned up {deleted} resolved fixture(s) older than 10 days.")
 
     finally:
         db.close()

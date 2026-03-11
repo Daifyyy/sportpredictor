@@ -3,6 +3,7 @@ Standalone predict script for GitHub Actions.
 Trains ensemble DC model for each league, fetches upcoming fixtures,
 and upserts pre-computed probabilities into fixture_predictions table.
 """
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -16,8 +17,9 @@ from scipy.stats import poisson
 from api.client import APIClient
 from config.settings import settings
 from data.fetcher import FootballFetcher
-from db.models import Base, FixturePrediction
+from db.models import Base, FixturePrediction, ResolvedFixturePrediction
 from db.session import SessionLocal, engine
+from features.engineer import FeatureEngineer
 from models.ensemble import CUP_LEAGUES, EnsembleDCPredictor
 from models.poisson import DixonColesPredictor
 
@@ -93,6 +95,91 @@ def train_ensemble(
     return EnsembleDCPredictor(dc_all, dc_season, dc_recent, league_key=league_key)
 
 
+def archive_resolved_fixtures(db, client, league_key: str, completed) -> int:
+    """Before wiping fixture_predictions for a league, archive rows whose match is now FT.
+
+    Features are computed from `completed` history — FeatureEngineer correctly returns
+    pre-match stats for any fixture in the history (uses position-based past filtering).
+    Returns number of newly archived rows.
+    """
+    existing = db.query(FixturePrediction).filter(
+        FixturePrediction.league == league_key
+    ).all()
+    if not existing:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    to_archive = []
+
+    for row in existing:
+        if row.match_date > now:
+            continue  # Not played yet
+        already = db.query(ResolvedFixturePrediction).filter(
+            ResolvedFixturePrediction.fixture_id == row.fixture_id
+        ).first()
+        if already:
+            continue
+        data = client.get("fixtures", {"id": row.fixture_id}, ttl=3600)
+        if not data:
+            continue
+        resp = data.get("response", [])
+        if not resp:
+            continue
+        raw = resp[0]
+        status = raw["fixture"]["status"]["short"]
+        goals = raw.get("goals", {})
+        if status == "FT" and goals.get("home") is not None and goals.get("away") is not None:
+            to_archive.append((row, int(goals["home"]), int(goals["away"])))
+
+    if not to_archive:
+        return 0
+
+    # Compute pre-match features for all fixtures being archived
+    fe = FeatureEngineer()
+    fe.precompute(completed)
+    fixture_by_id = {f.id: f for f in completed}
+
+    for row, hs, as_ in to_archive:
+        fx = fixture_by_id.get(row.fixture_id)
+        feats = fe.build_features(fx, completed) if fx else {}
+
+        outcome = "H" if hs > as_ else ("D" if hs == as_ else "A")
+        predicted = max(
+            [("H", row.prob_home), ("D", row.prob_draw), ("A", row.prob_away)],
+            key=lambda x: x[1],
+        )[0]
+
+        db.add(ResolvedFixturePrediction(
+            fixture_id=row.fixture_id,
+            league=league_key,
+            home_team=row.home_team,
+            away_team=row.away_team,
+            home_logo=row.home_logo,
+            away_logo=row.away_logo,
+            match_date=row.match_date,
+            prob_home=row.prob_home,
+            prob_draw=row.prob_draw,
+            prob_away=row.prob_away,
+            over2_5=row.over2_5,
+            under2_5=row.under2_5,
+            goals1_3=row.goals1_3,
+            goals2_4=row.goals2_4,
+            btts_yes=row.btts_yes,
+            btts_no=row.btts_no,
+            home_score=hs,
+            away_score=as_,
+            actual_outcome=outcome,
+            predicted_outcome=predicted,
+            correct=(outcome == predicted),
+            features_json=json.dumps(feats) if feats else None,
+            computed_at=row.computed_at,
+        ))
+        print(f"  Archived: {row.home_team} vs {row.away_team}  {hs}-{as_} ({outcome})")
+
+    db.commit()
+    return len(to_archive)
+
+
 def main():
     Base.metadata.create_all(engine)
     client = APIClient(settings)
@@ -148,6 +235,11 @@ def main():
                 continue
 
             print(f"\n[{cfg.name}] Computing predictions for {len(upcoming)} upcoming fixtures...")
+
+            # Archive completed fixtures before wiping the table
+            archived = archive_resolved_fixtures(db, client, league_key, completed)
+            if archived:
+                print(f"  → Archived {archived} resolved fixture(s)")
 
             # Delete stale rows for this league
             db.query(FixturePrediction).filter(FixturePrediction.league == league_key).delete()

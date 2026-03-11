@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ for _k in ["DATABASE_URL", "API_FOOTBALL_KEY"]:
 from api.client import APIClient
 from config.settings import settings
 from data.fetcher import FootballFetcher
-from db.models import Base, FixturePrediction, TrackedPrediction
+from db.models import Base, FixturePrediction, ResolvedFixturePrediction, TrackedPrediction
 from db.session import engine
 from features.engineer import FeatureEngineer
 from models.ensemble import EnsembleDCPredictor
@@ -316,7 +317,7 @@ Base.metadata.create_all(engine)
 st.set_page_config(page_title="Football Tracker", page_icon="⚽", layout="wide")
 st.title("⚽ Football Prediction Tracker")
 
-tab_pred, tab_tracked, tab_stats = st.tabs(["📅 Predikce", "📋 Sledované predikce", "📊 Statistiky"])
+tab_pred, tab_tracked, tab_results, tab_stats = st.tabs(["📅 Predikce", "📋 Sledované predikce", "🔍 Výsledky", "📊 Statistiky"])
 
 
 # ── TAB 1: Predikce ────────────────────────────────────────────────────────────
@@ -534,7 +535,93 @@ with tab_tracked:
         st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
 
-# ── TAB 3: Statistiky ──────────────────────────────────────────────────────────
+# ── TAB 3: Výsledky ────────────────────────────────────────────────────────────
+
+with tab_results:
+    st.subheader("Výsledky posledního kola")
+    st.caption("Archiv predikcí odehraných zápasů s předzápasovými statistikami. Data se mažou po 10 dnech.")
+
+    res_league = st.selectbox(
+        "Liga",
+        options=["Všechny"] + league_keys,
+        format_func=lambda k: "Všechny" if k == "Všechny" else leagues_display[k],
+        key="results_league",
+    )
+
+    with get_db() as db:
+        q = db.query(ResolvedFixturePrediction)
+        if res_league != "Všechny":
+            q = q.filter(ResolvedFixturePrediction.league == res_league)
+        resolved_rows = q.order_by(ResolvedFixturePrediction.match_date.desc()).all()
+
+    if not resolved_rows:
+        st.info("Žádné archivované výsledky. Data se plní automaticky při každém denním běhu predikcí.")
+    else:
+        # Overview table
+        prob_cols_r = ["P(H)%", "P(D)%", "P(A)%"]
+        overview = pd.DataFrame([{
+            "Datum": r.match_date.strftime("%d.%m %H:%M"),
+            "Liga": leagues_display.get(r.league, r.league),
+            "Domácí": r.home_team,
+            "Hosté": r.away_team,
+            "Výsledek": f"{r.home_score}–{r.away_score}",
+            "P(H)%": round(r.prob_home * 100, 1),
+            "P(D)%": round(r.prob_draw * 100, 1),
+            "P(A)%": round(r.prob_away * 100, 1),
+            "Tip modelu": r.predicted_outcome,
+            "Správně": "✅" if r.correct else "❌",
+        } for r in resolved_rows])
+
+        def highlight_correct(row):
+            color = "#1a6e3c" if row["Správně"] == "✅" else "#6e1a1a"
+            return [f"background-color: {color}; color: white" if col == "Správně" else "" for col in row.index]
+
+        styled_r = (
+            overview.style
+            .apply(highlight_correct, axis=1)
+            .format({col: "{:.1f}" for col in prob_cols_r})
+        )
+        st.dataframe(styled_r, use_container_width=True, hide_index=True)
+
+        # Accuracy summary
+        total_r = len(resolved_rows)
+        correct_r = sum(1 for r in resolved_rows if r.correct)
+        st.caption(f"Úspěšnost modelu (1X2): **{correct_r}/{total_r}** = {correct_r/total_r*100:.1f}%")
+
+        st.subheader("Detailní analýza")
+        # Group league_avg per league for feature display
+        league_avgs_cache: dict = {}
+
+        for r in resolved_rows:
+            date_str = r.match_date.strftime("%d.%m.%Y %H:%M")
+            result_icon = "✅" if r.correct else "❌"
+            header = (
+                f"{result_icon}  {date_str}  ·  {r.home_team} {r.home_score}–{r.away_score} {r.away_team}"
+                f"  ·  tip: {r.predicted_outcome}  ·  skutečnost: {r.actual_outcome}"
+            )
+            with st.expander(header):
+                # Reconstruct fx_data dict compatible with render_match_detail
+                fx_data = {
+                    "home_team": r.home_team,
+                    "away_team": r.away_team,
+                    "prob_home": r.prob_home,
+                    "prob_draw": r.prob_draw,
+                    "prob_away": r.prob_away,
+                    "over2_5": r.over2_5,
+                    "under2_5": r.under2_5,
+                    "goals1_3": r.goals1_3,
+                    "goals2_4": r.goals2_4,
+                    "btts_yes": r.btts_yes,
+                    "btts_no": r.btts_no,
+                }
+                feats = json.loads(r.features_json) if r.features_json else {}
+                # Lazy-load league avg per league (cached in dict for this page run)
+                if r.league not in league_avgs_cache:
+                    _, league_avgs_cache[r.league] = get_league_features(r.league)
+                render_match_detail(fx_data, feats, league_avgs_cache.get(r.league, {}))
+
+
+# ── TAB 4: Statistiky ──────────────────────────────────────────────────────────
 
 with tab_stats:
     st.subheader("Statistiky")
