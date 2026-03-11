@@ -554,28 +554,49 @@ with tab_pred:
     if not fixtures:
         st.info("Žádné nadcházející zápasy.")
     else:
-        # ── Přehledová tabulka ───────────────────────────────────────────────
-        prob_cols = ["H%", "D%", "A%", "O2.5%", "BTTS%"]
-        df = pd.DataFrame([{
-            "Datum": f["date"][5:16].replace("T", " "),  # MM-DD HH:MM
-            "Domácí": f["home_team"],
-            "Hosté": f["away_team"],
-            "H%": round(f["prob_home"] * 100, 1),
-            "D%": round(f["prob_draw"] * 100, 1),
-            "A%": round(f["prob_away"] * 100, 1),
-            "O2.5%": round(f.get("over2_5", 0) * 100, 1),
-            "BTTS%": round(f.get("btts_yes", 0) * 100, 1),
-        } for f in fixtures])
+        # ── Přehledová tabulka (HTML — responsivní: PC=logo+název, mobil=jen logo) ──
+        def _pct_cell(val: float) -> str:
+            s = "background:#1a6e3c;color:#fff;font-weight:700;" if val >= 65 else ""
+            return f'<td style="{s}">{val:.1f}</td>'
 
-        def highlight_high(val):
-            if isinstance(val, float) and val >= 65:
-                return "background-color: #1a6e3c; color: white; font-weight: bold"
-            return ""
+        rows_html = []
+        for f in fixtures:
+            h_logo = f.get("home_logo") or ""
+            a_logo = f.get("away_logo") or ""
+            h_img = f'<img src="{h_logo}" width="22" height="22" style="vertical-align:middle">' if h_logo else "🏠"
+            a_img = f'<img src="{a_logo}" width="22" height="22" style="vertical-align:middle">' if a_logo else "✈️"
+            date = f["date"][5:16].replace("T", " ")
+            rows_html.append(f"""<tr>
+<td>{date}</td>
+<td class="logo">{h_img}</td><td class="tname">{f["home_team"]}</td>
+<td class="logo">{a_img}</td><td class="tname">{f["away_team"]}</td>
+{_pct_cell(f["prob_home"]*100)}{_pct_cell(f["prob_draw"]*100)}{_pct_cell(f["prob_away"]*100)}
+{_pct_cell(f.get("over2_5",0)*100)}{_pct_cell(f.get("btts_yes",0)*100)}
+{_pct_cell(f.get("goals1_3",0)*100)}{_pct_cell(f.get("goals2_4",0)*100)}
+</tr>""")
 
-        styled = df.style.applymap(highlight_high, subset=["H%", "D%", "A%"]).format(
-            {col: "{:.1f}" for col in prob_cols}
-        )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.markdown(f"""
+<style>
+.pt{{width:100%;border-collapse:collapse;font-size:14px}}
+.pt th,.pt td{{padding:6px 8px;text-align:center;border-bottom:1px solid #2a2a2a;white-space:nowrap}}
+.pt th{{color:#aaa;font-size:11px;font-weight:600;text-transform:uppercase}}
+.pt td.logo{{width:30px;padding:4px 4px}}
+.pt td.tname{{text-align:left;max-width:140px;overflow:hidden;text-overflow:ellipsis}}
+@media(max-width:768px){{
+  .pt .tname{{display:none}}
+  .pt{{font-size:12px}}
+  .pt th,.pt td{{padding:5px 5px}}
+}}
+</style>
+<div style="overflow-x:auto">
+<table class="pt"><thead><tr>
+<th>Datum</th>
+<th class="logo"></th><th class="tname">Domácí</th>
+<th class="logo"></th><th class="tname">Hosté</th>
+<th>H%</th><th>D%</th><th>A%</th>
+<th>O2.5</th><th>BTTS</th><th>G1-3</th><th>G2-4</th>
+</tr></thead><tbody>{"".join(rows_html)}</tbody></table>
+</div>""", unsafe_allow_html=True)
 
         # ── Detailní analýza (expandery) ────────────────────────────────────
         st.subheader("Detailní analýza")
