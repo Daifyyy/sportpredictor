@@ -440,21 +440,24 @@ button[kind="secondary"], button[kind="primary"], [data-testid="baseButton-secon
 [data-testid="stSelectbox"] > div > div {
     min-height: 44px !important;
 }
-/* Tabs — prevent label overflow on narrow screens */
+/* Tabs */
 [data-testid="stTabs"] [role="tab"] {
-    padding-left: 0.5rem !important;
-    padding-right: 0.5rem !important;
+    padding-left: 0.75rem !important;
+    padding-right: 0.75rem !important;
 }
-[data-testid="stTabs"] [role="tab"] p {
-    font-size: 13px !important;
-    white-space: nowrap;
-}
-/* Metrics — compact on mobile */
+/* Mobile: compact tabs and metrics */
 @media (max-width: 768px) {
+    [data-testid="stTabs"] [role="tab"] {
+        padding-left: 0.4rem !important;
+        padding-right: 0.4rem !important;
+    }
+    [data-testid="stTabs"] [role="tab"] p {
+        font-size: 12px !important;
+        white-space: nowrap;
+    }
     [data-testid="stMetricValue"] { font-size: 1.3rem !important; }
     [data-testid="stMetricLabel"] { font-size: 0.75rem !important; }
-    /* Stack injury columns vertically on very small screens */
-    [data-testid="stHorizontalBlock"] > div { min-width: 140px; }
+    [data-testid="stHorizontalBlock"] > div { min-width: 130px; }
 }
 /* Dataframe horizontal scroll on mobile */
 [data-testid="stDataFrame"] > div { overflow-x: auto !important; }
@@ -554,16 +557,17 @@ with tab_pred:
     if not fixtures:
         st.info("Žádné nadcházející zápasy.")
     else:
-        # ── Přehledová tabulka (mobile-first: jen 1X2 pravděpodobnosti) ────────
-        # Goal markets (O2.5, U2.5, BTTS…) jsou v detailu každého zápasu níže.
-        prob_cols = ["H%", "D%", "A%"]
+        # ── Přehledová tabulka ───────────────────────────────────────────────
+        prob_cols = ["H%", "D%", "A%", "O2.5%", "BTTS%"]
         df = pd.DataFrame([{
-            "Datum": f["date"][5:16].replace("T", " "),  # MM-DD HH:MM — kratší pro mobil
+            "Datum": f["date"][5:16].replace("T", " "),  # MM-DD HH:MM
             "Domácí": f["home_team"],
             "Hosté": f["away_team"],
             "H%": round(f["prob_home"] * 100, 1),
             "D%": round(f["prob_draw"] * 100, 1),
             "A%": round(f["prob_away"] * 100, 1),
+            "O2.5%": round(f.get("over2_5", 0) * 100, 1),
+            "BTTS%": round(f.get("btts_yes", 0) * 100, 1),
         } for f in fixtures])
 
         def highlight_high(val):
@@ -571,7 +575,7 @@ with tab_pred:
                 return "background-color: #1a6e3c; color: white; font-weight: bold"
             return ""
 
-        styled = df.style.applymap(highlight_high, subset=prob_cols).format(
+        styled = df.style.applymap(highlight_high, subset=["H%", "D%", "A%"]).format(
             {col: "{:.1f}" for col in prob_cols}
         )
         st.dataframe(styled, use_container_width=True, hide_index=True)

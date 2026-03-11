@@ -1,5 +1,9 @@
-from typing import List, Tuple
-from data.models import PlayerInjury
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, List, Tuple
+
+if TYPE_CHECKING:
+    from data.models import PlayerInjury
 
 
 class InjuryAdjuster:
