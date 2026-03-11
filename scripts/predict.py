@@ -20,6 +20,7 @@ from data.fetcher import FootballFetcher
 from db.models import Base, FixturePrediction, ResolvedFixturePrediction
 from db.session import SessionLocal, engine
 from features.engineer import FeatureEngineer
+from models.calibrator import ProbabilityCalibrator
 from models.ensemble import CUP_LEAGUES, EnsembleDCPredictor
 from models.poisson import DixonColesPredictor
 
@@ -180,6 +181,44 @@ def archive_resolved_fixtures(db, client, league_key: str, completed) -> int:
     return len(to_archive)
 
 
+def build_calibrator(completed, league_key: str, min_train: int = 100, retrain_every: int = 50) -> ProbabilityCalibrator | None:
+    """Walk-forward calibration data collection using dc_all only (fast).
+
+    Retrains dc_all every `retrain_every` matches, predicts the next fixture.
+    Collects out-of-sample (prob_H, prob_D, prob_A, actual) pairs, then fits
+    an isotonic regression calibrator. Returns None if < 80 samples collected.
+    """
+    if len(completed) < min_train + 30:
+        return None
+
+    samples_ph, samples_pd, samples_pa, actuals = [], [], [], []
+    model: DixonColesPredictor | None = None
+
+    for i in range(min_train, len(completed)):
+        if model is None or (i - min_train) % retrain_every == 0:
+            dc = DixonColesPredictor()
+            dc.train(completed[:i])
+            model = dc
+
+        fx = completed[i]
+        try:
+            pred = model.predict(fx)
+        except Exception:
+            continue
+
+        samples_ph.append(pred.prob_home)
+        samples_pd.append(pred.prob_draw)
+        samples_pa.append(pred.prob_away)
+        actuals.append(fx.result.outcome)
+
+    if len(actuals) < 80:
+        return None
+
+    cal = ProbabilityCalibrator()
+    cal.fit(samples_ph, samples_pd, samples_pa, actuals)
+    return cal
+
+
 def main():
     Base.metadata.create_all(engine)
     client = APIClient(settings)
@@ -225,6 +264,17 @@ def main():
                 continue
             cup_results[league_key] = (completed, model)
 
+        # Build per-league calibrators from walk-forward backtest on historical data
+        print("\n[Calibration] Fitting isotonic regression calibrators...")
+        calibrators: dict[str, ProbabilityCalibrator | None] = {}
+        for league_key, (completed, _) in {**domestic_results, **cup_results}.items():
+            cal = build_calibrator(completed, league_key)
+            calibrators[league_key] = cal
+            if cal:
+                print(f"  {settings.leagues[league_key].name}: {cal.n_samples} samples | ECE {cal.ece_before:.4f} → {cal.ece_after:.4f}")
+            else:
+                print(f"  {settings.leagues[league_key].name}: not enough samples, skipping")
+
         # Save predictions for all leagues
         all_results = {**domestic_results, **cup_results}
         for league_key, (completed, model) in all_results.items():
@@ -244,8 +294,17 @@ def main():
             # Delete stale rows for this league
             db.query(FixturePrediction).filter(FixturePrediction.league == league_key).delete()
 
+            cal = calibrators.get(league_key)
+
             for fx in upcoming:
                 pred = model.predict(fx)
+
+                # Apply isotonic calibration if available
+                if cal is not None:
+                    ph, pd_val, pa = cal.transform(pred.prob_home, pred.prob_draw, pred.prob_away)
+                else:
+                    ph, pd_val, pa = pred.prob_home, pred.prob_draw, pred.prob_away
+
                 gp = compute_goal_probs(pred.expected_goals_home, pred.expected_goals_away)
 
                 row = FixturePrediction(
@@ -256,9 +315,9 @@ def main():
                     home_logo=fx.home_team.logo or None,
                     away_logo=fx.away_team.logo or None,
                     match_date=fx.date,
-                    prob_home=round(pred.prob_home, 4),
-                    prob_draw=round(pred.prob_draw, 4),
-                    prob_away=round(pred.prob_away, 4),
+                    prob_home=round(ph, 4),
+                    prob_draw=round(pd_val, 4),
+                    prob_away=round(pa, 4),
                     over2_5=gp["over2_5"],
                     under2_5=gp["under2_5"],
                     goals1_3=gp["goals1_3"],

@@ -685,3 +685,67 @@ with tab_stats:
             st.dataframe(df_league, use_container_width=True, hide_index=True)
             if not df_league.empty:
                 st.bar_chart(df_league.set_index("Liga")["Úspěšnost %"])
+
+        # ── Reliability diagram from resolved_fixture_predictions ─────────────
+        st.divider()
+        st.subheader("Kalibrace modelu")
+        st.caption(
+            "Reliability diagram: pokud je model dobře zkalibrován, měly by body ležet na diagonále. "
+            "Data z posledních 10 dní (resolved_fixture_predictions)."
+        )
+
+        with get_db() as db:
+            cal_rows = db.query(ResolvedFixturePrediction).all()
+
+        if len(cal_rows) < 20:
+            st.info("Nedostatek dat pro reliability diagram (potřeba ≥ 20 odehraných zápasů v archivu).")
+        else:
+            n_bins = 5
+            edges = [i / n_bins for i in range(n_bins + 1)]
+
+            bin_data = []
+            for outcome, prob_attr, label in [
+                ("H", "prob_home", "Výhra domácích"),
+                ("D", "prob_draw", "Remíza"),
+                ("A", "prob_away", "Výhra hostů"),
+            ]:
+                probs  = [getattr(r, prob_attr) for r in cal_rows]
+                labels = [1 if r.actual_outcome == outcome else 0 for r in cal_rows]
+                for i in range(n_bins):
+                    lo, hi = edges[i], edges[i + 1]
+                    idxs = [j for j, p in enumerate(probs) if lo <= p < hi]
+                    if len(idxs) < 3:
+                        continue
+                    mean_pred  = sum(probs[j] for j in idxs) / len(idxs)
+                    actual_freq = sum(labels[j] for j in idxs) / len(idxs)
+                    bin_data.append({
+                        "Outcome": label,
+                        "Predicted %": round(mean_pred * 100, 1),
+                        "Actual %": round(actual_freq * 100, 1),
+                        "N": len(idxs),
+                    })
+
+            if bin_data:
+                df_cal = pd.DataFrame(bin_data)
+                # One chart per outcome
+                cal_col1, cal_col2, cal_col3 = st.columns(3)
+                for col_widget, outcome_label in zip(
+                    [cal_col1, cal_col2, cal_col3],
+                    ["Výhra domácích", "Remíza", "Výhra hostů"],
+                ):
+                    subset = df_cal[df_cal["Outcome"] == outcome_label].copy()
+                    if subset.empty:
+                        continue
+                    with col_widget:
+                        st.caption(f"**{outcome_label}**")
+                        subset = subset.set_index("Predicted %")[["Actual %"]].sort_index()
+                        # Add perfect calibration reference
+                        perfect = pd.DataFrame(
+                            {"Actual %": subset.index.tolist()},
+                            index=subset.index,
+                        )
+                        combined = subset.rename(columns={"Actual %": "Model"})
+                        combined["Ideál"] = combined.index
+                        st.line_chart(combined, use_container_width=True)
+            else:
+                st.info("Nedostatek dat v jednotlivých binech.")
