@@ -371,20 +371,22 @@ def main():
         all_results = {**domestic_results, **cup_results}
         for league_key, (completed, model) in all_results.items():
             cfg = settings.leagues[league_key]
-            upcoming = fetcher.get_upcoming_fixtures(cfg, next_n=10)
-            if not upcoming:
-                print(f"\n[{cfg.name}] No upcoming fixtures found.")
-                continue
-
-            print(f"\n[{cfg.name}] Computing predictions for {len(upcoming)} upcoming fixtures...")
-
-            # Archive completed fixtures before wiping the table
+            # Archive completed fixtures before wiping the table (must happen before upcoming check
+            # so fixtures are preserved even when no upcoming matches exist for the league)
             archived = archive_resolved_fixtures(db, client, league_key, completed)
             if archived:
                 print(f"  → Archived {archived} resolved fixture(s)")
 
             # Delete stale rows for this league
             db.query(FixturePrediction).filter(FixturePrediction.league == league_key).delete()
+
+            upcoming = fetcher.get_upcoming_fixtures(cfg, next_n=10)
+            if not upcoming:
+                print(f"\n[{cfg.name}] No upcoming fixtures found.")
+                db.commit()
+                continue
+
+            print(f"\n[{cfg.name}] Computing predictions for {len(upcoming)} upcoming fixtures...")
 
             cal = calibrators.get(league_key)
 
