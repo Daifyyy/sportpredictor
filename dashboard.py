@@ -878,61 +878,65 @@ with tab_stats:
         st.subheader("Kalibrace modelu")
         st.caption(
             "Reliability diagram: pokud je model dobře zkalibrován, měly by body ležet na diagonále. "
-            "Data z posledních 10 dní (resolved_fixture_predictions)."
+            "Data z posledních 60 dní (resolved_fixture_predictions). "
+            "Šedé pásmo = 90% Clopper-Pearson interval spolehlivosti; číslo v závorce = počet zápasů v binu."
         )
 
         with get_db() as db:
             cal_rows = db.query(ResolvedFixturePrediction).all()
 
-        if len(cal_rows) < 20:
-            st.info("Nedostatek dat pro reliability diagram (potřeba ≥ 20 odehraných zápasů v archivu).")
+        if len(cal_rows) < 50:
+            st.info(f"Nedostatek dat pro reliability diagram (potřeba ≥ 50 odehraných zápasů v archivu, aktuálně {len(cal_rows)}).")
         else:
+            from scipy.stats import beta as beta_dist
+
             n_bins = 5
             edges = [i / n_bins for i in range(n_bins + 1)]
 
-            bin_data = []
-            for outcome, prob_attr, label in [
-                ("H", "prob_home", "Výhra domácích"),
-                ("D", "prob_draw", "Remíza"),
-                ("A", "prob_away", "Výhra hostů"),
-            ]:
+            cal_col1, cal_col2, cal_col3 = st.columns(3)
+            for col_widget, (outcome, prob_attr, outcome_label) in zip(
+                [cal_col1, cal_col2, cal_col3],
+                [
+                    ("H", "prob_home", "Výhra domácích"),
+                    ("D", "prob_draw", "Remíza"),
+                    ("A", "prob_away", "Výhra hostů"),
+                ],
+            ):
                 probs  = [getattr(r, prob_attr) for r in cal_rows]
                 labels = [1 if r.actual_outcome == outcome else 0 for r in cal_rows]
+
+                rows = []
                 for i in range(n_bins):
                     lo, hi = edges[i], edges[i + 1]
                     idxs = [j for j, p in enumerate(probs) if lo <= p < hi]
-                    if len(idxs) < 3:
+                    n = len(idxs)
+                    if n < 5:
                         continue
-                    mean_pred  = sum(probs[j] for j in idxs) / len(idxs)
-                    actual_freq = sum(labels[j] for j in idxs) / len(idxs)
-                    bin_data.append({
-                        "Outcome": label,
+                    k = sum(labels[j] for j in idxs)
+                    mean_pred = sum(probs[j] for j in idxs) / n
+                    actual_freq = k / n
+                    # Clopper-Pearson 90% CI
+                    ci_lo, ci_hi = beta_dist.interval(0.90, k + 0.5, n - k + 0.5)
+                    rows.append({
                         "Predicted %": round(mean_pred * 100, 1),
-                        "Actual %": round(actual_freq * 100, 1),
-                        "N": len(idxs),
+                        "Model": round(actual_freq * 100, 1),
+                        "CI low": round(ci_lo * 100, 1),
+                        "CI high": round(ci_hi * 100, 1),
+                        "N": n,
                     })
 
-            if bin_data:
-                df_cal = pd.DataFrame(bin_data)
-                # One chart per outcome
-                cal_col1, cal_col2, cal_col3 = st.columns(3)
-                for col_widget, outcome_label in zip(
-                    [cal_col1, cal_col2, cal_col3],
-                    ["Výhra domácích", "Remíza", "Výhra hostů"],
-                ):
-                    subset = df_cal[df_cal["Outcome"] == outcome_label].copy()
-                    if subset.empty:
+                with col_widget:
+                    st.caption(f"**{outcome_label}** (celkem {sum(r['N'] for r in rows)} zápasů v binech)")
+                    if not rows:
+                        st.caption("Nedostatek dat v binech.")
                         continue
-                    with col_widget:
-                        st.caption(f"**{outcome_label}**")
-                        subset = subset.set_index("Predicted %")[["Actual %"]].sort_index()
-                        # Add perfect calibration reference
-                        perfect = pd.DataFrame(
-                            {"Actual %": subset.index.tolist()},
-                            index=subset.index,
-                        )
-                        combined = subset.rename(columns={"Actual %": "Model"})
-                        combined["Ideál"] = combined.index
-                        st.line_chart(combined, use_container_width=True)
-            else:
-                st.info("Nedostatek dat v jednotlivých binech.")
+                    df_out = pd.DataFrame(rows).set_index("Predicted %").sort_index()
+                    # Show model + ideal line
+                    chart_df = df_out[["Model"]].copy()
+                    chart_df["Ideál"] = chart_df.index
+                    st.line_chart(chart_df, use_container_width=True)
+                    # CI as a small table below chart
+                    ci_display = df_out[["Model", "CI low", "CI high", "N"]].copy()
+                    ci_display.index = [f"{x}%" for x in ci_display.index]
+                    ci_display.columns = ["Actual %", "CI 90% low", "CI 90% high", "N"]
+                    st.dataframe(ci_display, use_container_width=True)

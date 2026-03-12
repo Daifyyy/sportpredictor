@@ -102,14 +102,14 @@ def main():
         db.commit()
         print(f"Resolved {resolved} predictions.")
 
-        # Clean up resolved_fixture_predictions older than 10 days
-        cutoff = now - timedelta(days=10)
+        # Clean up resolved_fixture_predictions older than 60 days
+        cutoff = now - timedelta(days=60)
         deleted = db.query(ResolvedFixturePrediction).filter(
             ResolvedFixturePrediction.match_date < cutoff
         ).delete()
         if deleted:
             db.commit()
-            print(f"Cleaned up {deleted} resolved fixture(s) older than 10 days.")
+            print(f"Cleaned up {deleted} resolved fixture(s) older than 60 days.")
 
     finally:
         db.close()
