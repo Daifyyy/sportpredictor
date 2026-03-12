@@ -14,8 +14,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: cache/football.db
-          key: api-cache-${{ runner.os }}
-          restore-keys: api-cache-
+          key: api-cache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            api-cache-${{ runner.os }}-
+            api-cache-
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
