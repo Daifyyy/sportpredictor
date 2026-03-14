@@ -13,8 +13,8 @@ cp .env.example .env
 ## Commands
 
 ```bash
-# Run predictions for all 5 leagues
-python main.py
+# Run predictions for all 9 leagues
+python scripts/predict.py
 
 # Run walk-forward backtesting for all leagues
 python run_backtest.py
@@ -36,6 +36,7 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - `features/engineer.py` — `FeatureEngineer`: produces feature dicts (form, H2H, Elo). Add new features as new methods; pipeline composes automatically.
 - `models/base.py` — `BasePredictor` ABC with `train(fixtures)`, `predict(fixture, history)`, `name`. All models must implement this.
 - `models/poisson.py` — `DixonColesPredictor`: MLE-trained Poisson model with DC correction (rho=-0.13) for low-score results.
+- `models/calibrator.py` — `ProbabilityCalibrator`: isotonic regression per H/D/A, fitted via walk-forward backtest on API history. NaN predictions are filtered before fitting.
 - `betting/value.py` — `ValueBetDetector`: compares model probabilities to Bet365 implied odds. Edge threshold: 3%.
 - `backtesting/engine.py` — `BacktestEngine`: walk-forward simulation with periodic retrain. Reports accuracy, Brier score, log loss, and calibration.
 
@@ -45,6 +46,8 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - **BasePredictor interface**: add new models (e.g., XGBoost) by subclassing `BasePredictor` — no changes needed elsewhere.
 - **Value bet focus**: the product is built around edge detection (model prob vs. implied odds), not raw outcome prediction.
 - Odds are fetched from Bet365 (bookmaker ID 11 in API-Football).
+- **enrich_with_statistics is NOT called globally** — it runs only inside `archive_resolved_fixtures`, scoped to the last 8 fixtures of teams being archived. DC model training does not need stats. This keeps GitHub Actions API calls at ~100-300 per run instead of 4500+.
+- **Calibration is independent of DB** — `build_calibrator()` uses only API history (thousands of samples). `resolved_fixture_predictions` is used only for the reliability diagram in the dashboard, not as a calibration input.
 
 ## Current stack
 
@@ -52,14 +55,20 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - **Weights (leagues)**: dc_all=0.25, dc_season=0.45, dc_recent=0.30
 - **Weights (cups)**: dc_all=0.60, dc_season=0.30, dc_recent=0.10 — cups have fewer matches per team
 - **Cup leagues**: `champions_league`, `europa_league`, `conference_league` (defined in `CUP_LEAGUES` in ensemble.py)
-- **DB**: Supabase — `tracked_predictions` (user picks) + `fixture_predictions` (daily pre-computed cache)
+- **DB**: Supabase — `tracked_predictions` (user picks) + `fixture_predictions` (daily pre-computed cache) + `resolved_fixture_predictions` (60-day archive of played matches)
 - **Automation**: GitHub Actions — `predict.yml` (10:00 UTC) + `resolve.yml` (23:00 UTC)
-- **Dashboard**: Streamlit Community Cloud (`dashboard.py`), reads DB directly
+- **Dashboard**: Streamlit Community Cloud (`dashboard.py`), reads DB directly. 4 tabs: Predikce / Sledované / Výsledky / Statistiky
+
+## scripts/predict.py flow (GitHub Actions 10:00 UTC)
+
+1. Phase 1: domestic leagues → train ensemble, collect `dc_all.attack/defence` as cup priors
+2. Phase 2: cup leagues → train with domestic priors as MLE x0 (Varianta C)
+3. Calibration: `build_calibrator()` — walk-forward dc_all on API history, isotonic regression, NaN filtered
+4. `archive_resolved_fixtures()` — for each league: check FT fixtures in DB, enrich only involved teams' recent fixtures (last 8), save to `resolved_fixture_predictions` with `features_json`
+5. DELETE stale rows + INSERT new upcoming predictions (calibrated probabilities)
+6. `update_tracked_probs()` — update `model_prob` for unresolved tracked_predictions
 
 ## Planned next steps
 
-1. **Varianta C pro poháry** — použít parametry z domácích lig jako prior pro UCL/UEL MLE:
-   - Natrénuj DC model na domácích ligách → získej `attack[tým]`, `defense[tým]`
-   - Použij jako `x0` (startovací bod) pro UCL MLE místo nul
-   - UCL data jen doladí parametry, týmy co hrají málo pohárových zápasů zdědí domácí sílu
-   - Vyžaduje: mapování tým_id → liga, multi-league fetch před UCL tréninkem
+1. **Value bety** — betting/ je prázdná, predict.py netahá odds ani nepočítá edge
+2. **Backtesting tab** v dashboardu
