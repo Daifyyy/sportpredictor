@@ -721,6 +721,24 @@ with tab_tracked:
             })
         st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
+    # ── Odebrat sledovanou predikci ──────────────────────────────────────────
+    pending_rows = [r for r in rows if r.correct is None]
+    if pending_rows:
+        st.divider()
+        st.caption("Odebrat sledovanou predikci")
+        options = {
+            f"{r.home_team} vs {r.away_team}  –  {r.prediction_type}  ({r.match_date.strftime('%d.%m.')})": r.id
+            for r in pending_rows
+        }
+        to_delete_label = st.selectbox("Vyber predikci", list(options.keys()), key="delete_select")
+        if st.button("🗑️ Odebrat", key="delete_btn"):
+            row_id = options[to_delete_label]
+            with get_db() as db:
+                db.query(TrackedPrediction).filter(TrackedPrediction.id == row_id).delete()
+                db.commit()
+            st.success("Predikce odebrána.")
+            st.rerun()
+
 
 # ── TAB 3: Výsledky ────────────────────────────────────────────────────────────
 
