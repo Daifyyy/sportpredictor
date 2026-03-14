@@ -152,7 +152,7 @@ def train_ensemble(
     return EnsembleDCPredictor(dc_all, dc_season, dc_recent, league_key=league_key)
 
 
-def archive_resolved_fixtures(db, client, league_key: str, completed) -> int:
+def archive_resolved_fixtures(db, fetcher: "FootballFetcher", league_key: str, completed) -> int:
     """Before wiping fixture_predictions for a league, archive rows whose match is now FT.
 
     Features are computed from `completed` history — FeatureEngineer correctly returns
@@ -176,7 +176,7 @@ def archive_resolved_fixtures(db, client, league_key: str, completed) -> int:
         ).first()
         if already:
             continue
-        data = client.get("fixtures", {"id": row.fixture_id}, ttl=3600)
+        data = fetcher.client.get("fixtures", {"id": row.fixture_id}, ttl=3600)
         if not data:
             continue
         resp = data.get("response", [])
@@ -191,10 +191,32 @@ def archive_resolved_fixtures(db, client, league_key: str, completed) -> int:
     if not to_archive:
         return 0
 
+    fixture_by_id = {f.id: f for f in completed}
+
+    # Targeted enrichment: fetch stats only for recent fixtures of teams being archived.
+    # Avoids fetching stats for all 1000+ historical matches — stats are optional in features.
+    teams_needed: set = set()
+    for row, _, _ in to_archive:
+        fx_chk = fixture_by_id.get(row.fixture_id)
+        if fx_chk:
+            teams_needed.add(fx_chk.home_team.id)
+            teams_needed.add(fx_chk.away_team.id)
+    if teams_needed:
+        team_recent_map: dict = {}
+        for f in sorted(completed, key=lambda x: x.date):
+            for tid in (f.home_team.id, f.away_team.id):
+                if tid in teams_needed:
+                    team_recent_map.setdefault(tid, []).append(f)
+        subset_ids: set = set()
+        for tid_fixtures in team_recent_map.values():
+            for f in tid_fixtures[-8:]:
+                subset_ids.add(f.id)
+        subset = [f for f in completed if f.id in subset_ids]
+        fetcher.enrich_with_statistics(subset)
+
     # Compute pre-match features for all fixtures being archived
     fe = FeatureEngineer()
     fe.precompute(completed)
-    fixture_by_id = {f.id: f for f in completed}
 
     for row, hs, as_ in to_archive:
         fx = fixture_by_id.get(row.fixture_id)
@@ -294,6 +316,9 @@ def build_calibrator(completed, league_key: str, min_train: int = 100, retrain_e
         except Exception:
             continue
 
+        if np.isnan(pred.prob_home) or np.isnan(pred.prob_draw) or np.isnan(pred.prob_away):
+            continue
+
         samples_ph.append(pred.prob_home)
         samples_pd.append(pred.prob_draw)
         samples_pa.append(pred.prob_away)
@@ -327,7 +352,6 @@ def main():
             print(f"\n[{cfg.name}]")
             history = fetcher.get_fixtures(cfg, status="FT")
             completed = [f for f in history if f.result is not None]
-            fetcher.enrich_with_statistics(completed)
             model = train_ensemble(completed, cfg, league_key=league_key)
             if model is None:
                 continue
@@ -346,7 +370,6 @@ def main():
             print(f"\n[{cfg.name}]")
             history = fetcher.get_fixtures(cfg, status="FT")
             completed = [f for f in history if f.result is not None]
-            fetcher.enrich_with_statistics(completed)
             model = train_ensemble(
                 completed, cfg, league_key=league_key,
                 attack_prior=domestic_attack,
@@ -373,7 +396,7 @@ def main():
             cfg = settings.leagues[league_key]
             # Archive completed fixtures before wiping the table (must happen before upcoming check
             # so fixtures are preserved even when no upcoming matches exist for the league)
-            archived = archive_resolved_fixtures(db, client, league_key, completed)
+            archived = archive_resolved_fixtures(db, fetcher, league_key, completed)
             if archived:
                 print(f"  → Archived {archived} resolved fixture(s)")
 
