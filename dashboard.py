@@ -399,12 +399,17 @@ Napiš analýzu v tomto formátu (max 200 slov):
 3. **Závěr** — jedna věta s celkovým vyznění zápasu
 """
 
-    try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"❌ Chyba při volání Gemini API: {e}"
+    for model_name in ("gemini-2.0-flash", "gemini-1.5-flash"):
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "quota" in err.lower():
+                continue
+            return f"❌ Chyba při volání Gemini API: {e}"
+    return f"❌ Překročen limit Gemini API (free tier). Zkontroluj API klíč na aistudio.google.com."
 
 
 def get_db() -> SASession:
