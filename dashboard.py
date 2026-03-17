@@ -400,7 +400,7 @@ Napiš analýzu v tomto formátu (max 200 slov):
 """
 
     errors = []
-    for model_name in ("gemini-2.0-flash", "gemini-2.0-flash-lite"):
+    for model_name in ("gemini-2.5-flash", "gemini-2.5-pro"):
         try:
             response = client.models.generate_content(
                 model=model_name,
