@@ -399,6 +399,7 @@ Napiš analýzu v tomto formátu (max 200 slov):
 3. **Závěr** — jedna věta s celkovým vyznění zápasu
 """
 
+    errors = []
     for model_name in ("gemini-2.0-flash", "gemini-2.0-flash-lite"):
         try:
             response = client.models.generate_content(
@@ -407,11 +408,8 @@ Napiš analýzu v tomto formátu (max 200 slov):
             )
             return response.text
         except Exception as e:
-            err = str(e)
-            if "429" in err or "quota" in err.lower() or "404" in err:
-                continue
-            return f"❌ Chyba při volání Gemini API ({model_name}): {e}"
-    return "❌ Gemini API nedostupné. Zkontroluj GEMINI_API_KEY v Streamlit secrets."
+            errors.append(f"**{model_name}**: {e}")
+    return "❌ Gemini API selhalo:\n\n" + "\n\n".join(errors)
 
 
 def get_db() -> SASession:
