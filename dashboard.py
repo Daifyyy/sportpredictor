@@ -362,10 +362,19 @@ def generate_ai_analysis(fx: dict, feats: dict, league_avg: dict, inj_data: dict
     if away_inj:
         inj_line += f"- Zranění {away}: {', '.join(away_inj)}\n"
 
+    league_name = settings.leagues[fx["league"]].name if fx.get("league") and fx.get("league") in settings.leagues else ""
+    h2h_home_wins = feats.get("h2h_home_wins")
+    h2h_away_wins = feats.get("h2h_away_wins")
+    h2h_draws     = feats.get("h2h_draws")
+    h2h_line = (
+        f"- Výhry {home}: {h2h_home_wins*100:.0f}%, remízy: {h2h_draws*100:.0f}%, výhry {away}: {h2h_away_wins*100:.0f}%"
+        if h2h_home_wins is not None else "- H2H data nejsou k dispozici"
+    )
+
     prompt = f"""Jsi fotbalový analytik. Analyzuj nadcházející zápas pouze na základě níže uvedených dat.
 Nepřidávej žádné informace, které v datech nejsou. Piš česky, stručně a věcně.
 
-## Zápas: {home} vs {away}
+## Zápas: {home} vs {away}{f" ({league_name})" if league_name else ""}
 
 ### Pravděpodobnosti modelu
 - Výhra {home}: {fx.get("prob_home", 0)*100:.1f}%
@@ -375,28 +384,28 @@ Nepřidávej žádné informace, které v datech nejsou. Piš česky, stručně 
 - BTTS: {fx.get("btts_yes", 0)*100:.1f}%
 {xg_line}
 
-### Forma (posl. 5 zápasů) | průměr ligy: {avg_pts:.2f} pts, {avg_gf:.2f} GF
-- {home}: {fv("home_form")} pts/z, {fv("home_gf")} GF, {fv("home_ga")} GA, útok {fv("home_attack_str")}, obrana {fv("home_defense_str")}
-- {away}: {fv("away_form")} pts/z, {fv("away_gf")} GF, {fv("away_ga")} GA, útok {fv("away_attack_str")}, obrana {fv("away_defense_str")}
+### Forma (posl. 5 zápasů) | průměr ligy: {avg_pts:.2f} pts/z, {avg_gf:.2f} GF/z
+- {home}: {fv("home_form")} pts/z, {fv("home_gf")} GF, {fv("home_ga")} GA, útočná síla {fv("home_attack_str")}, obranná síla {fv("home_defense_str")}
+- {away}: {fv("away_form")} pts/z, {fv("away_gf")} GF, {fv("away_ga")} GA, útočná síla {fv("away_attack_str")}, obranná síla {fv("away_defense_str")}
 
 ### Domácí / Venkovní forma (posl. 5)
 - {home} doma: {fv("home_venue_form")} pts/z, {fv("home_venue_gf")} GF, {fv("home_venue_ga")} GA
 - {away} venku: {fv("away_venue_form")} pts/z, {fv("away_venue_gf")} GF, {fv("away_venue_ga")} GA
 
 ### Sezóna a Elo
-- {home}: PPG {fv("home_season_ppg")}, trend {fv("home_trend", fmt="+.2f")}, série {feats.get("home_streak", 0):+.0f}, Elo {fv("elo_home", fmt=".0f")}, odpočinek {feats.get("home_rest_days", 7):.0f} dní
-- {away}: PPG {fv("away_season_ppg")}, trend {fv("away_trend", fmt="+.2f")}, série {feats.get("away_streak", 0):+.0f}, Elo {fv("elo_away", fmt=".0f")}, odpočinek {feats.get("away_rest_days", 7):.0f} dní
+- {home}: PPG {fv("home_season_ppg")}, trend {fv("home_trend", fmt="+.2f")}, série {feats.get("home_streak", 0):+.0f}, Elo {fv("elo_home", fmt=".0f")} (průměr 1500), odpočinek {feats.get("home_rest_days", 7):.0f} dní
+- {away}: PPG {fv("away_season_ppg")}, trend {fv("away_trend", fmt="+.2f")}, série {feats.get("away_streak", 0):+.0f}, Elo {fv("elo_away", fmt=".0f")} (průměr 1500), odpočinek {feats.get("away_rest_days", 7):.0f} dní
 
-### Head to Head (posl. 10)
-- Výhry {home}: {feats.get("h2h_home_wins", 0)*100:.0f}%, remízy: {feats.get("h2h_draws", 0)*100:.0f}%, výhry {away}: {feats.get("h2h_away_wins", 0)*100:.0f}%
-- Průměrné góly: {home} {fv("h2h_home_gf")}, {away} {fv("h2h_away_gf")}
+### Head to Head (posl. 10 vzájemných zápasů)
+{h2h_line}
+- Průměrné góly: {home} {fv("h2h_home_gf", default="N/A")}, {away} {fv("h2h_away_gf", default="N/A")}
 
 {("### Zranění (chybějící hráči)\n" + inj_line) if inj_line else ""}
 ---
-Napiš analýzu v tomto formátu (max 200 slov):
+Napiš analýzu v tomto formátu (přibližně 150–250 slov):
 1. **Klíčové faktory** — 2–3 bullet pointy, co rozhodne zápas
-2. **Silné/slabé stránky** — stručně pro každý tým (1 věta)
-3. **Závěr** — jedna věta s celkovým vyznění zápasu
+2. **Silné/slabé stránky** — stručně pro každý tým (1–2 věty)
+3. **Závěr** — celkové vyznění zápasu a na co si dát pozor
 """
 
     errors = []
@@ -636,6 +645,7 @@ with tab_pred:
                 "btts_no": r.btts_no,
                 "expected_goals_home": getattr(r, "expected_goals_home", None),
                 "expected_goals_away": getattr(r, "expected_goals_away", None),
+                "league": league,
             } for r in rows]
             st.session_state["upcoming_data"] = data
             st.session_state["upcoming_league"] = league
