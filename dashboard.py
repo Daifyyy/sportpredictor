@@ -325,6 +325,88 @@ def render_injuries(
             st.caption("Žádná hlášená zranění")
 
 
+def generate_ai_analysis(fx: dict, feats: dict, league_avg: dict, inj_data: dict) -> str:
+    """Call Gemini API and return markdown analysis of the match."""
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return "❌ Knihovna `google-generativeai` není nainstalována."
+
+    api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "❌ Chybí `GEMINI_API_KEY` v st.secrets."
+
+    genai.configure(api_key=api_key)
+
+    home = fx["home_team"]
+    away = fx["away_team"]
+    avg_gf = league_avg.get("avg_gf", 1.4)
+    avg_pts = league_avg.get("avg_pts", 1.2)
+
+    def fv(key, default="N/A", mult=1, fmt=".2f"):
+        v = feats.get(key)
+        if isinstance(v, (int, float)):
+            return f"{v * mult:{fmt}}"
+        return str(default)
+
+    lam = fx.get("expected_goals_home")
+    mu  = fx.get("expected_goals_away")
+    xg_line = (f"- Očekávané góly (model): {home} λ={lam:.2f}, {away} μ={mu:.2f}, celkem={lam+mu:.2f}"
+               if lam and mu else "")
+
+    home_inj = [i["player_name"] for i in inj_data.get("home", []) if i.get("status") == "Missing"]
+    away_inj = [i["player_name"] for i in inj_data.get("away", []) if i.get("status") == "Missing"]
+    inj_line = ""
+    if home_inj:
+        inj_line += f"- Zranění {home}: {', '.join(home_inj)}\n"
+    if away_inj:
+        inj_line += f"- Zranění {away}: {', '.join(away_inj)}\n"
+
+    prompt = f"""Jsi fotbalový analytik. Analyzuj nadcházející zápas pouze na základě níže uvedených dat.
+Nepřidávej žádné informace, které v datech nejsou. Piš česky, stručně a věcně.
+
+## Zápas: {home} vs {away}
+
+### Pravděpodobnosti modelu
+- Výhra {home}: {fx.get("prob_home", 0)*100:.1f}%
+- Remíza: {fx.get("prob_draw", 0)*100:.1f}%
+- Výhra {away}: {fx.get("prob_away", 0)*100:.1f}%
+- Over 2.5 gólu: {fx.get("over2_5", 0)*100:.1f}%
+- BTTS: {fx.get("btts_yes", 0)*100:.1f}%
+{xg_line}
+
+### Forma (posl. 5 zápasů) | průměr ligy: {avg_pts:.2f} pts, {avg_gf:.2f} GF
+- {home}: {fv("home_form")} pts/z, {fv("home_gf")} GF, {fv("home_ga")} GA, útok {fv("home_attack_str")}, obrana {fv("home_defense_str")}
+- {away}: {fv("away_form")} pts/z, {fv("away_gf")} GF, {fv("away_ga")} GA, útok {fv("away_attack_str")}, obrana {fv("away_defense_str")}
+
+### Domácí / Venkovní forma (posl. 5)
+- {home} doma: {fv("home_venue_form")} pts/z, {fv("home_venue_gf")} GF, {fv("home_venue_ga")} GA
+- {away} venku: {fv("away_venue_form")} pts/z, {fv("away_venue_gf")} GF, {fv("away_venue_ga")} GA
+
+### Sezóna a Elo
+- {home}: PPG {fv("home_season_ppg")}, trend {fv("home_trend", fmt="+.2f")}, série {feats.get("home_streak", 0):+.0f}, Elo {fv("elo_home", fmt=".0f")}, odpočinek {feats.get("home_rest_days", 7):.0f} dní
+- {away}: PPG {fv("away_season_ppg")}, trend {fv("away_trend", fmt="+.2f")}, série {feats.get("away_streak", 0):+.0f}, Elo {fv("elo_away", fmt=".0f")}, odpočinek {feats.get("away_rest_days", 7):.0f} dní
+
+### Head to Head (posl. 10)
+- Výhry {home}: {feats.get("h2h_home_wins", 0)*100:.0f}%, remízy: {feats.get("h2h_draws", 0)*100:.0f}%, výhry {away}: {feats.get("h2h_away_wins", 0)*100:.0f}%
+- Průměrné góly: {home} {fv("h2h_home_gf")}, {away} {fv("h2h_away_gf")}
+
+{("### Zranění (chybějící hráči)\n" + inj_line) if inj_line else ""}
+---
+Napiš analýzu v tomto formátu (max 200 slov):
+1. **Klíčové faktory** — 2–3 bullet pointy, co rozhodne zápas
+2. **Silné/slabé stránky** — stručně pro každý tým (1 věta)
+3. **Závěr** — jedna věta s celkovým vyznění zápasu
+"""
+
+    try:
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"❌ Chyba při volání Gemini API: {e}"
+
+
 def get_db() -> SASession:
     return SASession(engine)
 
@@ -675,6 +757,15 @@ with tab_pred:
                             st.warning("Již sledováno.")
                         else:
                             st.error("Chyba při ukládání.")
+
+                ai_key = f"ai_{fx['fixture_id']}"
+                if st.button("🤖 AI analýza", key=f"ai_btn_{fx['fixture_id']}"):
+                    with st.spinner("Generuji analýzu..."):
+                        st.session_state[ai_key] = generate_ai_analysis(
+                            fx, feats, league_avg, inj_data
+                        )
+                if ai_key in st.session_state:
+                    st.markdown(st.session_state[ai_key])
 
 
 # ── TAB 2: Sledované predikce ──────────────────────────────────────────────────
