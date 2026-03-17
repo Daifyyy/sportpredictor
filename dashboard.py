@@ -368,7 +368,8 @@ def generate_ai_analysis(fx: dict, feats: dict, league_avg: dict, inj_data: dict
     h2h_draws     = feats.get("h2h_draws")
     h2h_line = (
         f"- Výhry {home}: {h2h_home_wins*100:.0f}%, remízy: {h2h_draws*100:.0f}%, výhry {away}: {h2h_away_wins*100:.0f}%"
-        if h2h_home_wins is not None else "- H2H data nejsou k dispozici"
+        if None not in (h2h_home_wins, h2h_draws, h2h_away_wins)
+        else "- H2H data nejsou k dispozici"
     )
 
     prompt = f"""Jsi fotbalový analytik. Analyzuj nadcházející zápas pouze na základě níže uvedených dat.
