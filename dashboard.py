@@ -328,15 +328,15 @@ def render_injuries(
 def generate_ai_analysis(fx: dict, feats: dict, league_avg: dict, inj_data: dict) -> str:
     """Call Gemini API and return markdown analysis of the match."""
     try:
-        import google.generativeai as genai
+        from google import genai
     except ImportError:
-        return "❌ Knihovna `google-generativeai` není nainstalována."
+        return "❌ Knihovna `google-genai` není nainstalována."
 
     api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         return "❌ Chybí `GEMINI_API_KEY` v st.secrets."
 
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
 
     home = fx["home_team"]
     away = fx["away_team"]
@@ -401,15 +401,17 @@ Napiš analýzu v tomto formátu (max 200 slov):
 
     for model_name in ("gemini-2.0-flash", "gemini-2.0-flash-lite"):
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
             return response.text
         except Exception as e:
             err = str(e)
             if "429" in err or "quota" in err.lower() or "404" in err:
                 continue
             return f"❌ Chyba při volání Gemini API ({model_name}): {e}"
-    return "❌ Gemini API nedostupné. Vytvoř nový klíč na aistudio.google.com → Get API key → Create API key in new project."
+    return "❌ Gemini API nedostupné. Zkontroluj GEMINI_API_KEY v Streamlit secrets."
 
 
 def get_db() -> SASession:
