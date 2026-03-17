@@ -168,78 +168,108 @@ def render_match_detail(fx_data: dict, feats: dict, league_avg: dict) -> None:
     avg_gf = league_avg.get("avg_gf", 1.4)
     avg_pts = league_avg.get("avg_pts", 1.2)
 
-    # ── Expected goals (λ/μ) — model's raw scoring rate estimates ──────────────
+    # ── Expected goals (λ/μ) ───────────────────────────────────────────────────
     lam = fx_data.get("expected_goals_home")
     mu  = fx_data.get("expected_goals_away")
     if lam is not None and mu is not None:
         eg_col1, eg_col2, eg_col3 = st.columns(3)
         eg_col1.metric(f"λ  ({home})", f"{lam:.2f}", help="Očekávaný počet gólů domácích (model)")
-        eg_col2.metric("Celkem gólů (model)", f"{lam + mu:.2f}", help="λ + μ = celkový očekávaný počet gólů v zápase")
+        eg_col2.metric("Σ gólů", f"{lam + mu:.2f}", help="λ + μ = celkový očekávaný počet gólů v zápase")
         eg_col3.metric(f"μ  ({away})", f"{mu:.2f}", help="Očekávaný počet gólů hostů (model)")
 
-    H = f"🏠 {home}"
-    A = f"✈️ {away}"
+    # ── Comparison table ───────────────────────────────────────────────────────
+    def _val(key: str) -> float | None:
+        v = feats.get(key)
+        return v if isinstance(v, (int, float)) else None
 
-    def tbl(caption: str, rows: list) -> None:
-        st.caption(caption)
-        st.dataframe(
-            pd.DataFrame(rows, columns=[H, "Statistika", A]),
-            use_container_width=True,
-            hide_index=True,
+    def _row(label: str, hv: float | None, av: float | None,
+             fmt: str = ".2f", higher_is_better: bool = True,
+             avg: float | None = None, neutral: bool = False) -> str:
+        hs = f"{hv:{fmt}}" if hv is not None else "—"
+        as_ = f"{av:{fmt}}" if av is not None else "—"
+        avg_s = (f" <span style='color:#555;font-size:10px'>ø{avg:.2f}</span>"
+                 if avg is not None else "")
+        h_style = a_style = "color:#ccc"
+        if not neutral and hv is not None and av is not None and abs(hv - av) > 0.02:
+            h_better = (hv > av) == higher_is_better
+            h_style = "color:#4ade80;font-weight:600" if h_better else "color:#f87171"
+            a_style = "color:#f87171" if h_better else "color:#4ade80;font-weight:600"
+        return (
+            f'<tr>'
+            f'<td style="text-align:right;padding:4px 10px;{h_style}">{hs}</td>'
+            f'<td style="text-align:center;padding:4px 6px;color:#777;font-size:12px;white-space:nowrap">'
+            f'{label}{avg_s}</td>'
+            f'<td style="padding:4px 10px;{a_style}">{as_}</td>'
+            f'</tr>'
+        )
+
+    def _sec(title: str) -> str:
+        return (
+            f'<tr><td colspan="3" style="padding:10px 10px 3px;color:#888;font-size:11px;'
+            f'text-transform:uppercase;letter-spacing:0.06em;border-top:1px solid #2a2a2a">'
+            f'{title}</td></tr>'
         )
 
     streak_h = feats.get("home_streak", 0)
     streak_a = feats.get("away_streak", 0)
+    sh = streak_h if isinstance(streak_h, (int, float)) else 0
+    sa = streak_a if isinstance(streak_a, (int, float)) else 0
 
-    tbl("⚡ Forma (posl. 5 zápasů)", [
-        [_fv(feats.get("home_form")),          f"Pts/zápas  ·  ø {avg_pts:.2f}",   _fv(feats.get("away_form"))],
-        [_fv(feats.get("home_gf")),             f"GF/zápas  ·  ø {avg_gf:.2f}",    _fv(feats.get("away_gf"))],
-        [_fv(feats.get("home_ga")),             f"GA/zápas  ·  ø {avg_gf:.2f}",    _fv(feats.get("away_ga"))],
-        [_fv(feats.get("home_attack_str")),     "Útočná síla  ·  ø 1.00",           _fv(feats.get("away_attack_str"))],
-        [_fv(feats.get("home_defense_str")),    "Obranná síla  ·  ø 1.00",          _fv(feats.get("away_defense_str"))],
-    ])
+    rows: list[str] = [
+        f'<tr>'
+        f'<th style="text-align:right;padding:6px 10px;color:#e2e8f0;font-size:13px">🏠 {home}</th>'
+        f'<th style="padding:6px 6px"></th>'
+        f'<th style="padding:6px 10px;color:#e2e8f0;font-size:13px">✈️ {away}</th>'
+        f'</tr>',
 
-    tbl("🏠 Domácí / ✈️ Venkovní forma (posl. 5 zápasů na vlastním hřišti / venku)", [
-        [_fv(feats.get("home_venue_form")),  f"Pts/zápas  ·  ø {avg_pts:.2f}",  _fv(feats.get("away_venue_form"))],
-        [_fv(feats.get("home_venue_gf")),    f"GF/zápas  ·  ø {avg_gf:.2f}",   _fv(feats.get("away_venue_gf"))],
-        [_fv(feats.get("home_venue_ga")),    f"GA/zápas  ·  ø {avg_gf:.2f}",   _fv(feats.get("away_venue_ga"))],
-    ])
+        _sec("Forma — posl. 5 zápasů"),
+        _row("Pts/zápas", _val("home_form"), _val("away_form"), avg=avg_pts),
+        _row("GF/zápas", _val("home_gf"), _val("away_gf"), avg=avg_gf),
+        _row("GA/zápas", _val("home_ga"), _val("away_ga"), avg=avg_gf, higher_is_better=False),
+        _row("Útočná síla", _val("home_attack_str"), _val("away_attack_str"), avg=1.0),
+        _row("Obranná síla", _val("home_defense_str"), _val("away_defense_str"), avg=1.0, higher_is_better=False),
 
-    tbl("📅 Sezóna · Trend · Elo", [
-        [_fv(feats.get("home_season_ppg")),   f"PPG sezóna  ·  ø {avg_pts:.2f}",  _fv(feats.get("away_season_ppg"))],
-        [_fv(feats.get("home_form_short")),   "Forma (posl. 3 zápasy)",            _fv(feats.get("away_form_short"))],
-        [_fv(feats.get("home_trend"), "+.2f"), "Trend (krátká − dlouhá forma)",   _fv(feats.get("away_trend"), "+.2f")],
-        [f"{streak_h:+.0f}" if isinstance(streak_h, (int, float)) else "—",
-         "Aktuální série  (W = +, L = −)",
-         f"{streak_a:+.0f}" if isinstance(streak_a, (int, float)) else "—"],
-        [_fv(feats.get("elo_home", 1500), ".0f"),  "Elo rating  ·  ø 1500",  _fv(feats.get("elo_away", 1500), ".0f")],
-        [f"{feats.get('home_rest_days', 7):.0f} dní", "Odpočinek od posl. zápasu",
-         f"{feats.get('away_rest_days', 7):.0f} dní"],
-    ])
+        _sec("Domácí / Venkovní forma — posl. 5"),
+        _row("Pts/zápas", _val("home_venue_form"), _val("away_venue_form"), avg=avg_pts),
+        _row("GF/zápas", _val("home_venue_gf"), _val("away_venue_gf"), avg=avg_gf),
+        _row("GA/zápas", _val("home_venue_ga"), _val("away_venue_ga"), avg=avg_gf, higher_is_better=False),
 
-    draws_pct = feats.get("h2h_draws", 0.33)
-    tbl("🤝 Head to Head (posl. 10 vzájemných zápasů)", [
-        [f"{feats.get('h2h_home_wins', 0.5) * 100:.0f} %",  "Výhry",              f"{feats.get('h2h_away_wins', 0.17) * 100:.0f} %"],
-        [f"{draws_pct * 100:.0f} %",                          "Remízy  ·  (shodně)", f"{draws_pct * 100:.0f} %"],
-        [_fv(feats.get("h2h_home_gf", 1.5)),                  f"Avg GF  ·  ø {avg_gf:.2f}", _fv(feats.get("h2h_away_gf", 1.2))],
-    ])
+        _sec("Sezóna · Trend · Elo"),
+        _row("PPG sezóna", _val("home_season_ppg"), _val("away_season_ppg"), avg=avg_pts),
+        _row("Forma posl. 3", _val("home_form_short"), _val("away_form_short")),
+        _row("Trend (krátká−dlouhá)", _val("home_trend"), _val("away_trend"), fmt="+.2f"),
+        _row("Série (W=+, L=−)", sh, sa, fmt="+.0f"),
+        _row("Elo rating", _val("elo_home") or 1500, _val("elo_away") or 1500, fmt=".0f", avg=1500),
+        _row("Odpočinek (dny)", _val("home_rest_days"), _val("away_rest_days"), fmt=".0f"),
 
-    # ── Zápasové statistiky (jen pokud jsou data — velké ligy s fixture/statistics) ──
+        _sec("Head to Head — posl. 10 vzájemných"),
+        _row("Výhry %", round(feats.get("h2h_home_wins", 0.5) * 100),
+             round(feats.get("h2h_away_wins", 0.17) * 100), fmt=".0f"),
+        _row("Remízy %", round(feats.get("h2h_draws", 0.33) * 100),
+             round(feats.get("h2h_draws", 0.33) * 100), fmt=".0f", neutral=True),
+        _row("Avg GF", _val("h2h_home_gf"), _val("h2h_away_gf"), avg=avg_gf),
+    ]
+
     has_shots = feats.get("home_avg_shots_on_target") is not None
     has_xg    = feats.get("home_avg_xg") is not None
     if has_shots or has_xg:
-        stats_rows = []
+        rows.append(_sec("Statistiky — průměr posl. 5 zápasů"))
         if has_shots:
-            stats_rows += [
-                [_fv(feats.get("home_avg_shots_on_target")), "Střely na bránu / zápas (posl. 5)",  _fv(feats.get("away_avg_shots_on_target"))],
-                [_fv(feats.get("home_avg_total_shots")),     "Celkové střely / zápas (posl. 5)",   _fv(feats.get("away_avg_total_shots"))],
-                [_fv(feats.get("home_avg_corners")),         "Rohy / zápas (posl. 5)",             _fv(feats.get("away_avg_corners"))],
+            rows += [
+                _row("Střely na bránu", _val("home_avg_shots_on_target"), _val("away_avg_shots_on_target")),
+                _row("Celkové střely", _val("home_avg_total_shots"), _val("away_avg_total_shots")),
+                _row("Rohy", _val("home_avg_corners"), _val("away_avg_corners")),
             ]
         if has_xg:
-            stats_rows.append(
-                [_fv(feats.get("home_avg_xg")), "xG / zápas (posl. 5)  ·  model očekávaná kvalita šancí", _fv(feats.get("away_avg_xg"))]
-            )
-        tbl("📊 Zápasové statistiky (průměr posl. 5 zápasů)", stats_rows)
+            rows.append(_row("xG/zápas", _val("home_avg_xg"), _val("away_avg_xg")))
+
+    st.markdown(
+        f'<div style="overflow-x:auto">'
+        f'<table style="width:100%;border-collapse:collapse;font-size:14px">'
+        f'{"".join(rows)}'
+        f'</table></div>',
+        unsafe_allow_html=True,
+    )
 
 
 _POS_CZ = {
