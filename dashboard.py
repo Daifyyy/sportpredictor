@@ -594,6 +594,70 @@ button[kind="secondary"], button[kind="primary"], [data-testid="baseButton-secon
 
 st.title("⚽ Football Tracker")
 
+
+# ── Sidebar: API status ─────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_api_status(api_key: str) -> dict | None:
+    """Volá /status endpoint přímo (bez cache klienta) — TTL 5 min."""
+    try:
+        r = __import__("requests").get(
+            "https://v3.football.api-sports.io/status",
+            headers={"x-apisports-key": api_key},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if data.get("errors"):
+            return {"error": str(data["errors"])}
+        return data.get("response", {})
+    except Exception as e:
+        return {"error": str(e)}
+
+
+with st.sidebar:
+    st.markdown("### API-Football")
+    api_key = settings.api_key
+    if not api_key or api_key == "YOUR_KEY_HERE":
+        st.error("API klíč není nastaven (API_FOOTBALL_KEY).")
+    else:
+        status_data = fetch_api_status(api_key)
+        if status_data is None or "error" in (status_data or {}):
+            err = (status_data or {}).get("error", "Neznámá chyba")
+            st.error(f"Chyba připojení: {err}")
+        else:
+            sub = status_data.get("subscription", {})
+            reqs = status_data.get("requests", {})
+
+            plan = sub.get("plan", "?")
+            active = sub.get("active", False)
+            end_date = sub.get("end", "?")
+
+            used = reqs.get("current", "?")
+            limit = reqs.get("limit_day", "?")
+            remaining = reqs.get("remaining_day", None)
+
+            # Stav plánu
+            if active:
+                st.success(f"Plán: **{plan}**")
+            else:
+                st.warning(f"Plán: **{plan}** — neaktivní (do {end_date})")
+
+            # Requesty dnes
+            if isinstance(used, int) and isinstance(limit, int):
+                pct = used / limit if limit > 0 else 0
+                st.progress(min(pct, 1.0), text=f"Requesty dnes: {used} / {limit}")
+                if plan.lower() == "free" or limit <= 100:
+                    st.caption(
+                        "Free plán: limit 100 req/den. "
+                        "Odds a zranění mohou být nedostupné."
+                    )
+            else:
+                st.caption(f"Requesty dnes: {used} / {limit}")
+
+            st.caption(f"Platnost: {end_date}  ·  Obnoveno před < 5 min")
+
+
 tab_pred, tab_tracked, tab_results, tab_stats = st.tabs(["📅 Predikce", "📋 Sledované", "🔍 Výsledky", "📊 Statistiky"])
 
 
@@ -900,7 +964,7 @@ with tab_results:
         st.info("Žádné archivované výsledky. Data se plní automaticky při každém denním běhu predikcí.")
     else:
         # Overview table
-        prob_cols_r = ["P(H)%", "P(D)%", "P(A)%"]
+        prob_cols_r = ["P(H)%", "P(D)%", "P(A)%", "P(G1-3)%"]
         overview = pd.DataFrame([{
             "Datum": r.match_date.strftime("%d.%m %H:%M"),
             "Liga": leagues_display.get(r.league, r.league),
@@ -912,11 +976,20 @@ with tab_results:
             "P(A)%": round(r.prob_away * 100, 1),
             "Tip modelu": r.predicted_outcome,
             "Správně": "✅" if r.correct else "❌",
+            "P(G1-3)%": round(r.goals1_3 * 100, 1),
+            "G1-3": "✅" if 1 <= (r.home_score + r.away_score) <= 3 else "❌",
         } for r in resolved_rows])
 
         def highlight_correct(row):
-            color = "#1a6e3c" if row["Správně"] == "✅" else "#6e1a1a"
-            return [f"background-color: {color}; color: white" if col == "Správně" else "" for col in row.index]
+            colors = []
+            for col in row.index:
+                if col == "Správně":
+                    colors.append(f"background-color: {'#1a6e3c' if row['Správně'] == '✅' else '#6e1a1a'}; color: white")
+                elif col == "G1-3":
+                    colors.append(f"background-color: {'#1a6e3c' if row['G1-3'] == '✅' else '#6e1a1a'}; color: white")
+                else:
+                    colors.append("")
+            return colors
 
         styled_r = (
             overview.style
@@ -928,7 +1001,11 @@ with tab_results:
         # Accuracy summary
         total_r = len(resolved_rows)
         correct_r = sum(1 for r in resolved_rows if r.correct)
-        st.caption(f"Úspěšnost modelu (1X2): **{correct_r}/{total_r}** = {correct_r/total_r*100:.1f}%")
+        correct_g13 = sum(1 for r in resolved_rows if 1 <= (r.home_score + r.away_score) <= 3)
+        st.caption(
+            f"Úspěšnost modelu (1X2): **{correct_r}/{total_r}** = {correct_r/total_r*100:.1f}%"
+            f"  ·  Goals 1–3 (skutečnost): **{correct_g13}/{total_r}** = {correct_g13/total_r*100:.1f}%"
+        )
 
         st.subheader("Detailní analýza")
         # Group league_avg per league for feature display
@@ -1048,15 +1125,11 @@ with tab_stats:
             n_bins = 5
             edges = [i / n_bins for i in range(n_bins + 1)]
 
-            cal_col1, cal_col2, cal_col3 = st.columns(3)
-            for col_widget, (outcome, prob_attr, outcome_label) in zip(
-                [cal_col1, cal_col2, cal_col3],
-                [
-                    ("H", "prob_home", "Výhra domácích"),
-                    ("D", "prob_draw", "Remíza"),
-                    ("A", "prob_away", "Výhra hostů"),
-                ],
-            ):
+            for outcome, prob_attr, outcome_label in [
+                ("H", "prob_home", "Výhra domácích"),
+                ("D", "prob_draw", "Remíza"),
+                ("A", "prob_away", "Výhra hostů"),
+            ]:
                 probs  = [getattr(r, prob_attr) for r in cal_rows]
                 labels = [1 if r.actual_outcome == outcome else 0 for r in cal_rows]
 
@@ -1080,18 +1153,15 @@ with tab_stats:
                         "N": n,
                     })
 
-                with col_widget:
-                    st.caption(f"**{outcome_label}** (celkem {sum(r['N'] for r in rows)} zápasů v binech)")
-                    if not rows:
-                        st.caption("Nedostatek dat v binech.")
-                        continue
-                    df_out = pd.DataFrame(rows).set_index("Predicted %").sort_index()
-                    # Show model + ideal line
-                    chart_df = df_out[["Model"]].copy()
-                    chart_df["Ideál"] = chart_df.index
-                    st.line_chart(chart_df, use_container_width=True)
-                    # CI as a small table below chart
-                    ci_display = df_out[["Model", "CI low", "CI high", "N"]].copy()
-                    ci_display.index = [f"{x}%" for x in ci_display.index]
-                    ci_display.columns = ["Actual %", "CI 90% low", "CI 90% high", "N"]
-                    st.dataframe(ci_display, use_container_width=True)
+                st.caption(f"**{outcome_label}** (celkem {sum(r['N'] for r in rows)} zápasů v binech)")
+                if not rows:
+                    st.caption("Nedostatek dat v binech.")
+                    continue
+                df_out = pd.DataFrame(rows).set_index("Predicted %").sort_index()
+                chart_df = df_out[["Model"]].copy()
+                chart_df["Ideál"] = chart_df.index
+                st.line_chart(chart_df, use_container_width=True)
+                ci_display = df_out[["Model", "CI low", "CI high", "N"]].copy()
+                ci_display.index = [f"{x}%" for x in ci_display.index]
+                ci_display.columns = ["Actual %", "CI 90% low", "CI 90% high", "N"]
+                st.dataframe(ci_display, use_container_width=True)
