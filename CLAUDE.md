@@ -58,6 +58,9 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - **DB**: Supabase — `tracked_predictions` (user picks) + `fixture_predictions` (daily pre-computed cache) + `resolved_fixture_predictions` (60-day archive of played matches)
 - **Automation**: GitHub Actions — `predict.yml` (10:00 UTC) + `resolve.yml` (23:00 UTC)
 - **Dashboard**: Streamlit Community Cloud (`dashboard.py`), reads DB directly. 4 tabs: Predikce / Sledované / Výsledky / Statistiky
+- **API status sidebar**: `fetch_api_status()` volá `/status` endpoint přímo (TTL 5 min), zobrazuje plán, denní requesty/limit, upozornění na Free plán (100 req/den, odds/injuries nedostupné)
+- **Výsledky tab**: tabulka obsahuje sloupce P(H)%, P(D)%, P(A)%, Tip modelu, Správně (1X2) + P(G1-3)%, G1-3 (✅/❌ zda zápas skončil 1–3 góly). Summary řádek zobrazuje accuracy pro oba typy.
+- **Kalibrace (Statistiky tab)**: reliability diagramy renderovány vertikálně (ne 3 sloupce) — čitelné na mobilu
 
 ## scripts/predict.py flow (GitHub Actions 10:00 UTC)
 
