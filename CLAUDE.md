@@ -32,11 +32,12 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - `api/cache.py` — `CacheManager`: SQLite TTL cache. TTL=-1 means never expires (used for finished match history).
 - `api/client.py` — `APIClient`: wraps `requests.Session` with token-bucket `RateLimiter` (300 req/min) and auto-caching. Pass `force_refresh=True` to bypass cache.
 - `data/fetcher.py` — `FootballFetcher`: orchestrates API calls. Returns typed dataclasses.
-- `data/models.py` — Core dataclasses: `Team`, `Fixture`, `MatchResult`, `Odds`, `Prediction`.
-- `features/engineer.py` — `FeatureEngineer`: produces feature dicts (form, H2H, Elo). Add new features as new methods; pipeline composes automatically.
+- `data/models.py` — Core dataclasses: `Team`, `Fixture`, `MatchResult`, `Odds`, `Prediction`, `PlayerInjury`, `FixtureStats`.
+- `features/engineer.py` — `FeatureEngineer`: produces feature dicts (form, H2H, Elo, venue, streak, rest days, xG stats). `precompute()` builds indexes in O(n); `build_features()` is leakage-free per fixture.
 - `models/base.py` — `BasePredictor` ABC with `train(fixtures)`, `predict(fixture, history)`, `name`. All models must implement this.
-- `models/poisson.py` — `DixonColesPredictor`: MLE-trained Poisson model with DC correction (rho=-0.13) for low-score results.
+- `models/poisson.py` — `DixonColesPredictor`: MLE-trained Poisson model with DC correction (rho=-0.13) for low-score results. `train()` accepts `attack_prior`/`defence_prior` for Varianta C (cup leagues).
 - `models/calibrator.py` — `ProbabilityCalibrator`: isotonic regression per H/D/A, fitted via walk-forward backtest on API history. NaN predictions are filtered before fitting.
+- `models/injury.py` — `InjuryAdjuster`: adjusts λ/μ for injuries. Uses `TYPE_CHECKING` guard for `PlayerInjury` import.
 - `betting/value.py` — `ValueBetDetector`: compares model probabilities to Bet365 implied odds. Edge threshold: 3%.
 - `backtesting/engine.py` — `BacktestEngine`: walk-forward simulation with periodic retrain. Reports accuracy, Brier score, log loss, and calibration.
 
@@ -55,12 +56,39 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - **Weights (leagues)**: dc_all=0.25, dc_season=0.45, dc_recent=0.30
 - **Weights (cups)**: dc_all=0.60, dc_season=0.30, dc_recent=0.10 — cups have fewer matches per team
 - **Cup leagues**: `champions_league`, `europa_league`, `conference_league` (defined in `CUP_LEAGUES` in ensemble.py)
-- **DB**: Supabase — `tracked_predictions` (user picks) + `fixture_predictions` (daily pre-computed cache) + `resolved_fixture_predictions` (60-day archive of played matches)
+- **DB**: Supabase — `tracked_predictions` (user picks) + `fixture_predictions` (daily pre-computed cache) + `resolved_fixture_predictions` (10-day archive of played matches)
 - **Automation**: GitHub Actions — `predict.yml` (10:00 UTC) + `resolve.yml` (23:00 UTC)
-- **Dashboard**: Streamlit Community Cloud (`dashboard.py`), reads DB directly. 4 tabs: Predikce / Sledované / Výsledky / Statistiky
+- **Dashboard**: Streamlit Community Cloud (`dashboard.py`), reads DB directly. **5 tabs**: Predikce / Sledované / Výsledky / Statistiky / Tabulka
 - **API status sidebar**: `fetch_api_status()` volá `/status` endpoint přímo (TTL 5 min), zobrazuje plán, denní requesty/limit, upozornění na Free plán (100 req/den, odds/injuries nedostupné)
 - **Výsledky tab**: tabulka obsahuje sloupce P(H)%, P(D)%, P(A)%, Tip modelu, Správně (1X2) + P(G1-3)%, G1-3 (✅/❌ zda zápas skončil 1–3 góly). Summary řádek zobrazuje accuracy pro oba typy.
 - **Kalibrace (Statistiky tab)**: reliability diagramy renderovány vertikálně (ne 3 sloupce) — čitelné na mobilu
+- **Tabulka tab**: ligová tabulka přes `/standings` endpoint. Přepínač Celková / Doma / Venku. TTL=6h. Pro poháry ve vyřazovací fázi vrací prázdný výsledek.
+
+## Dashboard tabs (5)
+
+1. **Predikce** — HTML tabulka (responsivní: PC = logo+název, mobil = jen logo); sloupce H% D% A% O2.5 U2.5 G1-3 G2-4 BTTS_Y BTTS_N; zelená ≥65%; expandery s detailní analýzou + zranění + tracking. Tlačítko "📌 Sledovat" používá `st.toast()` (floating notifikace — přežije zavření expanderu po re-runu).
+2. **Sledované** — filtr liga/stav; `tracked_prob` (přidáno) vs `model_prob` (aktuální) + delta s 🟢🟡🔴; resolve button
+3. **Výsledky** — archiv resolved_fixture_predictions, accuracy modelu
+4. **Statistiky** — accuracy by type/league + reliability diagram
+5. **Tabulka** — `/standings` endpoint; přepínač Celková/Doma/Venku; sloupce #, Tým, Z, V, R, P, GF, GA, +/-, Body (+ Forma v Celkové view)
+
+## Validace sázky (render_bet_validation)
+
+Funkce `render_bet_validation(fx_data, feats)` se volá v expanderu každého zápasu (po `render_match_detail`). Zobrazuje 4 signály pro každý typ sázky, jen pokud model překročí práh.
+
+**Goals 1-3** (zobrazí se pokud `goals1_3 ≥ 0.40`):
+- λ+μ (model xG celkem): 🟢 ≤2.3 / 🟡 ≤2.8 / 🔴 >2.8
+- Domácí avg gólů/zápas (home_gf + home_ga): 🟢 ≤2.5 / 🟡 ≤3.0 / 🔴 >3.0
+- Hosté avg gólů/zápas (away_gf + away_ga): 🟢 ≤2.5 / 🟡 ≤3.0 / 🔴 >3.0
+- H2H avg gólů celkem (h2h_home_gf + h2h_away_gf): 🟢 ≤2.5 / 🟡 ≤3.0 / 🔴 >3.0
+
+**Výhra domácích** (zobrazí se pokud `prob_home ≥ 0.45`):
+- λ/μ poměr: 🟢 ≥1.4 / 🟡 ≥1.1 / 🔴 <1.1
+- Domácí forma DOMA (home_venue_form, pts/z): 🟢 ≥2.0 / 🟡 ≥1.2 / 🔴 <1.2
+- H2H výhry domácích % (h2h_home_wins): 🟢 ≥50% / 🟡 ≥33% / 🔴 <33%
+- Elo rozdíl doma−hosté (elo_diff): 🟢 ≥+50 / 🟡 ≥0 / 🔴 <0
+
+Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, žlutá ≥2, červená <2).
 
 ## scripts/predict.py flow (GitHub Actions 10:00 UTC)
 
@@ -70,6 +98,37 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 4. `archive_resolved_fixtures()` — for each league: check FT fixtures in DB, enrich only involved teams' recent fixtures (last 8), save to `resolved_fixture_predictions` with `features_json`
 5. DELETE stale rows + INSERT new upcoming predictions (calibrated probabilities)
 6. `update_tracked_probs()` — update `model_prob` for unresolved tracked_predictions
+
+## FootballFetcher methods
+
+- `get_fixtures(league, status)` — all training seasons; FT: past seasons TTL=-1, current TTL=1h
+- `get_fixtures_season(league, season, status)` — single season (used by resolve.py)
+- `get_upcoming_fixtures(league, next_n)` — primary: `next` param; fallback: `status=NS` for cups
+- `get_fixture_statistics(fixture_id)` — `{team_id: FixtureStats}`, TTL=-1
+- `enrich_with_statistics(fixtures, max_per_team)` — in-place, last N per team
+- `get_fixture_injuries(fixture, league_id, season)` — `(home_inj, away_inj, home_goals, away_goals)`
+- `get_standings(league)` — list of standings groups, TTL=6h (1 group for domestic, N for cup phases)
+- `get_odds(fixture_id)` — all bookmakers, TTL=15min
+
+## DB tables (Supabase)
+
+- `fixture_predictions` — upcoming fixtures, denně přepisováno, kalibrované pravděpodobnosti. Sloupce: fixture_id, league, home_team, away_team, logos, match_date, prob_home/draw/away, over2_5, under2_5, goals1_3, goals2_4, btts_yes, btts_no, expected_goals_home/away, computed_at.
+- `resolved_fixture_predictions` — archiv odehraných zápasů s pre-match features JSON + výsledkem; TTL **10 dní** (resolve.py maže starší záznamy). Stejné sloupce jako fixture_predictions + home_score, away_score, actual_outcome, predicted_outcome, correct, features_json, resolved_at.
+- `tracked_predictions` — manuálně sledované predikce; `tracked_prob` (imutabilní, při přidání), `model_prob` (denně update); UniqueConstraint(fixture_id, prediction_type).
+
+## Gotchas
+
+- Supabase: Transaction pooler URL (port 6543), NOT direct connection
+- `Base.metadata.create_all(engine)` vytváří nové tabulky ale NEpřidává sloupce do existujících → ruční ALTER TABLE
+- `@st.cache_data` vyžaduje pickle-serializable návratové hodnoty → PlayerInjury se převádí na dict přes `dataclasses.asdict()`, rekonstruuje se jako `PlayerInjury(**d)` jen při potřebě
+- `models/injury.py`: `from __future__ import annotations` + `TYPE_CHECKING` guard pro PlayerInjury → žádný runtime import
+- SQLite CacheManager: `threading.Lock()` + WAL mode pro thread safety
+- `enrich_with_statistics()` voláno POUZE v `predict.py` (GitHub Actions s cache), NE v dashboardu (Streamlit Cloud nemá SQLite cache)
+- Kalibrované pravděpodobnosti jsou přímo uloženy v DB — dashboard čte bez další transformace
+
+## Bookmaker IDs (API Football)
+
+- ID 11 = 1xBet; ID 1 = Bet365; ID 23 = Pinnacle (prázdné odpovědi)
 
 ## Planned next steps
 

@@ -149,6 +149,14 @@ def get_league_injuries(league_key: str) -> dict:
     return result
 
 
+@st.cache_data(ttl=21600, show_spinner="Načítám tabulku...")
+def fetch_standings(league_key: str) -> list:
+    """Returns list of standings groups from API. TTL=6h."""
+    fetcher = get_fetcher()
+    cfg = settings.leagues[league_key]
+    return fetcher.get_standings(cfg)
+
+
 def _fv(val, fmt=".2f") -> str:
     if isinstance(val, (int, float)):
         try:
@@ -270,6 +278,83 @@ def render_match_detail(fx_data: dict, feats: dict, league_avg: dict) -> None:
         f'</table></div>',
         unsafe_allow_html=True,
     )
+
+
+def render_bet_validation(fx_data: dict, feats: dict) -> None:
+    """Render 4-signal validation for Goals 1-3 and Home Win bets."""
+    prob_home = fx_data.get("prob_home") or 0
+    goals1_3  = fx_data.get("goals1_3") or 0
+    lam = fx_data.get("expected_goals_home")
+    mu  = fx_data.get("expected_goals_away")
+
+    sections = []
+
+    # ── Goals 1-3 ─────────────────────────────────────────────────────────────
+    if goals1_3 >= 0.40:
+        lam_mu     = (lam + mu) if (lam is not None and mu is not None) else None
+        home_total = (feats.get("home_gf") or 0) + (feats.get("home_ga") or 0)
+        away_total = (feats.get("away_gf") or 0) + (feats.get("away_ga") or 0)
+        h2h_total  = (feats.get("h2h_home_gf") or 0) + (feats.get("h2h_away_gf") or 0)
+
+        def _g(val, g, y):   # lower is better
+            if val is None: return "⚪"
+            return "🟢" if val <= g else ("🟡" if val <= y else "🔴")
+
+        sections.append((
+            f"Goals 1–3  ({goals1_3 * 100:.0f}%)",
+            [
+                ("λ+μ (model xG celkem)",      f"{lam_mu:.2f}" if lam_mu else "—",    _g(lam_mu, 2.3, 2.8)),
+                ("Domácí avg gólů/zápas",       f"{home_total:.2f}",                   _g(home_total, 2.5, 3.0)),
+                ("Hosté avg gólů/zápas",         f"{away_total:.2f}",                   _g(away_total, 2.5, 3.0)),
+                ("H2H avg gólů celkem",          f"{h2h_total:.2f}",                    _g(h2h_total, 2.5, 3.0)),
+            ],
+        ))
+
+    # ── Home Win ──────────────────────────────────────────────────────────────
+    if prob_home >= 0.45:
+        ratio      = (lam / mu) if (lam is not None and mu is not None and mu > 0) else None
+        venue_form = feats.get("home_venue_form")
+        h2h_hw     = feats.get("h2h_home_wins")
+        elo_diff   = feats.get("elo_diff")
+
+        def _h(val, g, y):   # higher is better
+            if val is None: return "⚪"
+            return "🟢" if val >= g else ("🟡" if val >= y else "🔴")
+
+        sections.append((
+            f"Výhra domácích  ({prob_home * 100:.0f}%)",
+            [
+                ("λ/μ poměr (model)",           f"{ratio:.2f}" if ratio else "—",                 _h(ratio, 1.4, 1.1)),
+                ("Domácí forma DOMA (pts/z)",    f"{venue_form:.2f}" if venue_form is not None else "—",  _h(venue_form, 2.0, 1.2)),
+                ("H2H výhry domácích %",         f"{h2h_hw * 100:.0f}%" if h2h_hw is not None else "—", _h(h2h_hw, 0.50, 0.33)),
+                ("Elo rozdíl (doma − hosté)",    f"{elo_diff:+.0f}" if elo_diff is not None else "—",   _h(elo_diff, 50, 0)),
+            ],
+        ))
+
+    if not sections:
+        return
+
+    st.caption("📊 Validace sázky")
+    for title, signals in sections:
+        green = sum(1 for *_, icon in signals if icon == "🟢")
+        color = "#4ade80" if green >= 3 else ("#facc15" if green >= 2 else "#f87171")
+        st.markdown(
+            f'<div style="margin:6px 0 2px;font-size:13px;font-weight:600;color:{color}">'
+            f'{title} — {green}/4 signálů zelených</div>',
+            unsafe_allow_html=True,
+        )
+        rows_html = "".join(
+            f'<tr>'
+            f'<td style="padding:2px 6px;font-size:14px">{icon}</td>'
+            f'<td style="padding:2px 8px;color:#aaa;font-size:12px">{name}</td>'
+            f'<td style="padding:2px 8px;color:#e2e8f0;font-size:12px;font-weight:600;text-align:right">{val}</td>'
+            f'</tr>'
+            for name, val, icon in signals
+        )
+        st.markdown(
+            f'<table style="width:100%;border-collapse:collapse;margin-bottom:4px">{rows_html}</table>',
+            unsafe_allow_html=True,
+        )
 
 
 _POS_CZ = {
@@ -658,7 +743,7 @@ with st.sidebar:
             st.caption(f"Platnost: {end_date}  ·  Obnoveno před < 5 min")
 
 
-tab_pred, tab_tracked, tab_results, tab_stats = st.tabs(["📅 Predikce", "📋 Sledované", "🔍 Výsledky", "📊 Statistiky"])
+tab_pred, tab_tracked, tab_results, tab_stats, tab_standings = st.tabs(["📅 Predikce", "📋 Sledované", "🔍 Výsledky", "📊 Statistiky", "🏆 Tabulka"])
 
 
 # ── TAB 1: Predikce ────────────────────────────────────────────────────────────
@@ -810,6 +895,7 @@ with tab_pred:
             with st.expander(label):
                 feats = features_by_id.get(fx["fixture_id"], {})
                 render_match_detail(fx, feats, league_avg)
+                render_bet_validation(fx, feats)
 
                 render_injuries(
                     home, away,
@@ -832,11 +918,11 @@ with tab_pred:
                     if st.button("📌 Sledovat", key=f"track_btn_{fx['fixture_id']}"):
                         result = save_tracking(fx, league, track_type, None)
                         if result == "ok":
-                            st.success("Přidáno ke sledování.")
+                            st.toast("✅ Přidáno ke sledování.", icon="📌")
                         elif result == "duplicate":
-                            st.warning("Již sledováno.")
+                            st.toast("⚠️ Již sledováno.", icon="⚠️")
                         else:
-                            st.error("Chyba při ukládání.")
+                            st.toast("❌ Chyba při ukládání.", icon="❌")
 
                 ai_key = f"ai_{fx['fixture_id']}"
                 if st.button("🤖 AI analýza", key=f"ai_btn_{fx['fixture_id']}"):
@@ -1165,3 +1251,65 @@ with tab_stats:
                 ci_display.index = [f"{x}%" for x in ci_display.index]
                 ci_display.columns = ["Actual %", "CI 90% low", "CI 90% high", "N"]
                 st.dataframe(ci_display, use_container_width=True)
+
+
+# ── TAB 5: Tabulka ─────────────────────────────────────────────────────────────
+
+with tab_standings:
+    st.subheader("Ligová tabulka")
+
+    std_league = st.selectbox(
+        "Liga",
+        options=league_keys,
+        format_func=lambda k: leagues_display[k],
+        key="standings_league",
+    )
+
+    view = st.radio(
+        "Zobrazení",
+        ["Celková", "Doma", "Venku"],
+        horizontal=True,
+        key="standings_view",
+    )
+    view_key = {"Celková": "all", "Doma": "home", "Venku": "away"}[view]
+
+    groups = fetch_standings(std_league)
+
+    if not groups:
+        st.info("Tabulka není pro tuto ligu k dispozici (pohárové ligy ve vyřazovací fázi nemají skupinovou tabulku).")
+    else:
+        for group_idx, group in enumerate(groups):
+            if len(groups) > 1:
+                group_name = group[0].get("group", f"Skupina {group_idx + 1}") if group else f"Skupina {group_idx + 1}"
+                st.markdown(f"**{group_name}**")
+
+            rows = []
+            for entry in group:
+                stats = entry.get(view_key, {})
+                goals = stats.get("goals", {})
+                gf = goals.get("for", 0) or 0
+                ga = goals.get("against", 0) or 0
+                row = {
+                    "#": entry.get("rank", ""),
+                    "Tým": entry["team"]["name"],
+                    "Z": stats.get("played", 0),
+                    "V": stats.get("win", 0),
+                    "R": stats.get("draw", 0),
+                    "P": stats.get("lose", 0),
+                    "GF": gf,
+                    "GA": ga,
+                    "+/-": gf - ga,
+                }
+                if view_key == "all":
+                    row["Body"] = entry.get("points", 0)
+                    row["Forma"] = entry.get("form", "")
+                else:
+                    # Compute points for home/away split (not in API directly)
+                    row["Body"] = stats.get("win", 0) * 3 + stats.get("draw", 0)
+                rows.append(row)
+
+            if rows:
+                df_std = pd.DataFrame(rows)
+                st.dataframe(df_std, use_container_width=True, hide_index=True)
+
+        st.caption("Data z API-Football · obnoveno každých 6 hodin")

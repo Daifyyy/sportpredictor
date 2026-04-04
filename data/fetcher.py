@@ -198,6 +198,22 @@ class FootballFetcher:
         total = response.get("goals", {}).get("for", {}).get("total", {}).get("total")
         return int(total) if total else 50
 
+    def get_standings(self, league: LeagueConfig) -> list:
+        """Returns list of standings tables (1 for domestic leagues, multiple for cup groups).
+        Each entry contains rank, team, points, goalsDiff, form, and all/home/away stats.
+        TTL=6h — updates after each matchday."""
+        data = self.client.get(
+            "standings",
+            {"league": league.id, "season": league.season},
+            ttl=21600,  # 6h
+        )
+        if not data:
+            return []
+        response = data.get("response", [])
+        if not response:
+            return []
+        return response[0].get("league", {}).get("standings", [])
+
     def get_odds(self, fixture_id: int) -> List[Odds]:
         """Fetch all available bookmaker odds for a fixture in a single API call."""
         data = self.client.get("odds", {"fixture": fixture_id}, ttl=self.ttl.odds)
