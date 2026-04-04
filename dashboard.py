@@ -140,9 +140,10 @@ def get_league_injuries(league_key: str) -> dict:
             )
         except Exception:
             home_inj, away_inj, home_goals, away_goals = [], [], 50, 50
+        # Deduplicate by player_id (API-Football may return the same player multiple times)
         result[fx.id] = {
-            "home": [asdict(i) for i in home_inj],
-            "away": [asdict(i) for i in away_inj],
+            "home": list({i.player_id: asdict(i) for i in home_inj}.values()),
+            "away": list({i.player_id: asdict(i) for i in away_inj}.values()),
             "home_goals": home_goals,
             "away_goals": away_goals,
         }
