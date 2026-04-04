@@ -205,7 +205,7 @@ class FootballFetcher:
         data = self.client.get(
             "standings",
             {"league": league.id, "season": league.season},
-            ttl=21600,  # 6h
+            ttl=86400,  # 24h — standings change only after a matchday
         )
         if not data:
             return []

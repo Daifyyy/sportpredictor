@@ -149,9 +149,9 @@ def get_league_injuries(league_key: str) -> dict:
     return result
 
 
-@st.cache_data(ttl=21600, show_spinner="Načítám tabulku...")
+@st.cache_data(ttl=86400, show_spinner="Načítám tabulku...")
 def fetch_standings(league_key: str) -> list:
-    """Returns list of standings groups from API. TTL=6h."""
+    """Returns list of standings groups from API. TTL=24h — standings change only after a matchday."""
     fetcher = get_fetcher()
     cfg = settings.leagues[league_key]
     return fetcher.get_standings(cfg)
