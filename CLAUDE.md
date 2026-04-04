@@ -125,6 +125,7 @@ Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, 
 - SQLite CacheManager: `threading.Lock()` + WAL mode pro thread safety
 - `enrich_with_statistics()` voláno POUZE v `predict.py` (GitHub Actions s cache), NE v dashboardu (Streamlit Cloud nemá SQLite cache)
 - Kalibrované pravděpodobnosti jsou přímo uloženy v DB — dashboard čte bez další transformace
+- `get_fixture_injuries()`: API-Football může vrátit stejného hráče vícekrát → `raw_by_team` je `Dict[int, Dict[int, dict]]` (klíč = player_id), deduplikace zabraňuje duplicitám v UI
 
 ## Bookmaker IDs (API Football)
 

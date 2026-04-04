@@ -126,23 +126,23 @@ class FootballFetcher:
         if not data or not data.get("response"):
             return [], [], 50, 50
 
-        # Group raw entries by team_id
-        raw_by_team: Dict[int, list] = {}
+        # Group raw entries by team_id, dedup by player_id
+        raw_by_team: Dict[int, Dict[int, dict]] = {}
         for item in data["response"]:
             team_id = item["team"]["id"]
             p = item["player"]
             # Normalize "Missing Fixture" / "Questionable" — API uses player.type or player.reason
             raw_status = (p.get("status") or p.get("type") or "").lower()
             status = "Questionable" if any(w in raw_status for w in ("question", "doubtful", "doubt")) else "Missing"
-            raw_by_team.setdefault(team_id, []).append({
+            raw_by_team.setdefault(team_id, {})[p["id"]] = {
                 "player_id": p["id"],
                 "name": p["name"],
                 "status": status,
-            })
+            }
 
         def enrich(team_id: int) -> List[PlayerInjury]:
             injuries = []
-            for p in raw_by_team.get(team_id, []):
+            for p in raw_by_team.get(team_id, {}).values():
                 stats = self._get_player_season_stats(p["player_id"], league_id, season)
                 if not stats or stats.get("position", "Unknown") == "Unknown":
                     continue
