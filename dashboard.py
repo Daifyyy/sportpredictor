@@ -1294,6 +1294,7 @@ with tab_standings:
                 ga = goals.get("against", 0) or 0
                 row = {
                     "#": entry.get("rank", ""),
+                    "Logo": entry["team"].get("logo", ""),
                     "Tým": entry["team"]["name"],
                     "Z": stats.get("played", 0),
                     "V": stats.get("win", 0),
@@ -1307,12 +1308,18 @@ with tab_standings:
                     row["Body"] = entry.get("points", 0)
                     row["Forma"] = entry.get("form", "")
                 else:
-                    # Compute points for home/away split (not in API directly)
                     row["Body"] = stats.get("win", 0) * 3 + stats.get("draw", 0)
                 rows.append(row)
 
             if rows:
                 df_std = pd.DataFrame(rows)
-                st.dataframe(df_std, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    df_std,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Logo": st.column_config.ImageColumn("", width="small"),
+                    },
+                )
 
         st.caption("Data z API-Football · obnoveno každých 6 hodin")
