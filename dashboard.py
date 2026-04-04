@@ -1281,45 +1281,78 @@ with tab_standings:
     if not groups:
         st.info("Tabulka není pro tuto ligu k dispozici (pohárové ligy ve vyřazovací fázi nemají skupinovou tabulku).")
     else:
+        def _form_html(form: str) -> str:
+            """Colorize form string: W=green, D=gray, L=red."""
+            colors = {"W": "#4ade80", "D": "#888", "L": "#f87171"}
+            return "".join(
+                f'<span style="color:{colors.get(c, "#ccc")};font-weight:600">{c}</span>'
+                for c in (form or "")
+            )
+
         for group_idx, group in enumerate(groups):
             if len(groups) > 1:
                 group_name = group[0].get("group", f"Skupina {group_idx + 1}") if group else f"Skupina {group_idx + 1}"
                 st.markdown(f"**{group_name}**")
 
-            rows = []
-            for entry in group:
-                stats = entry.get(view_key, {})
-                goals = stats.get("goals", {})
-                gf = goals.get("for", 0) or 0
-                ga = goals.get("against", 0) or 0
-                row = {
-                    "#": entry.get("rank", ""),
-                    "Logo": entry["team"].get("logo", ""),
-                    "Tým": entry["team"]["name"],
-                    "Z": stats.get("played", 0),
-                    "V": stats.get("win", 0),
-                    "R": stats.get("draw", 0),
-                    "P": stats.get("lose", 0),
-                    "GF": gf,
-                    "GA": ga,
-                    "+/-": gf - ga,
-                }
-                if view_key == "all":
-                    row["Body"] = entry.get("points", 0)
-                    row["Forma"] = entry.get("form", "")
-                else:
-                    row["Body"] = stats.get("win", 0) * 3 + stats.get("draw", 0)
-                rows.append(row)
+            show_form = view_key == "all"
+            header_extra = "<th class='sth-extra'>GF</th><th class='sth-extra'>GA</th>"
+            header_form  = "<th class='sth-extra'>Forma</th>" if show_form else ""
+            header_pts   = "<th class='sth-pts'>Body</th>"
 
-            if rows:
-                df_std = pd.DataFrame(rows)
-                st.dataframe(
-                    df_std,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Logo": st.column_config.ImageColumn("", width="small"),
-                    },
+            thead = (
+                f"<tr><th class='sth-rank'>#</th><th class='sth-logo'></th>"
+                f"<th class='sth-name'>Tým</th>"
+                f"<th>Z</th><th>V</th><th>R</th><th>P</th>"
+                f"{header_extra}+/-{header_form}{header_pts}</tr>"
+            )
+
+            rows_html = []
+            for entry in group:
+                stats  = entry.get(view_key, {})
+                goals  = stats.get("goals", {})
+                gf     = goals.get("for", 0) or 0
+                ga     = goals.get("against", 0) or 0
+                pts    = entry.get("points", 0) if show_form else stats.get("win", 0) * 3 + stats.get("draw", 0)
+                diff   = gf - ga
+                diff_s = f"+{diff}" if diff > 0 else str(diff)
+                logo   = entry["team"].get("logo", "")
+                img    = f'<img src="{logo}" width="20" height="20" style="vertical-align:middle">' if logo else "•"
+                form_td = f"<td class='sth-extra'>{_form_html(entry.get('form', ''))}</td>" if show_form else ""
+                rows_html.append(
+                    f"<tr>"
+                    f"<td class='sth-rank'>{entry.get('rank', '')}</td>"
+                    f"<td class='sth-logo'>{img}</td>"
+                    f"<td class='sth-name'>{entry['team']['name']}</td>"
+                    f"<td>{stats.get('played', 0)}</td>"
+                    f"<td>{stats.get('win', 0)}</td>"
+                    f"<td>{stats.get('draw', 0)}</td>"
+                    f"<td>{stats.get('lose', 0)}</td>"
+                    f"<td class='sth-extra'>{gf}</td>"
+                    f"<td class='sth-extra'>{ga}</td>"
+                    f"<td>{diff_s}</td>"
+                    f"{form_td}"
+                    f"<td class='sth-pts'>{pts}</td>"
+                    f"</tr>"
                 )
 
-        st.caption("Data z API-Football · obnoveno každých 6 hodin")
+            st.markdown(f"""
+<style>
+.sth{{width:100%;border-collapse:collapse;font-size:14px}}
+.sth th,.sth td{{padding:5px 7px;text-align:center;border-bottom:1px solid #2a2a2a;white-space:nowrap}}
+.sth th{{color:#aaa;font-size:11px;font-weight:600;text-transform:uppercase}}
+.sth-rank{{width:24px;color:#888}}
+.sth-logo{{width:28px;padding:3px 5px}}
+.sth-name{{text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis}}
+.sth-pts{{font-weight:700;color:#e2e8f0}}
+@media(max-width:768px){{
+  .sth-name{{display:none}}
+  .sth-extra{{display:none}}
+  .sth{{font-size:12px}}
+  .sth th,.sth td{{padding:4px 5px}}
+}}
+</style>
+<div style="overflow-x:auto">
+<table class="sth"><thead>{thead}</thead><tbody>{"".join(rows_html)}</tbody></table>
+</div>""", unsafe_allow_html=True)
+
+        st.caption("Data z API-Football · obnoveno 1× denně")
