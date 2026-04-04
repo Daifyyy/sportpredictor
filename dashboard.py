@@ -311,7 +311,10 @@ def render_bet_validation(fx_data: dict, feats: dict) -> None:
         ))
 
     # ── Home Win ──────────────────────────────────────────────────────────────
-    if prob_home >= 0.45:
+    prob_draw = fx_data.get("prob_draw") or 0
+    prob_away = fx_data.get("prob_away") or 0
+    home_is_favorite = prob_home >= prob_draw and prob_home >= prob_away
+    if prob_home >= 0.40 or home_is_favorite:
         ratio      = (lam / mu) if (lam is not None and mu is not None and mu > 0) else None
         venue_form = feats.get("home_venue_form")
         h2h_hw     = feats.get("h2h_home_wins")
