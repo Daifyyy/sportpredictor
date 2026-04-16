@@ -36,7 +36,7 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - `features/engineer.py` — `FeatureEngineer`: produces feature dicts (form, H2H, Elo, venue, streak, rest days, xG stats). `precompute()` builds indexes in O(n); `build_features()` is leakage-free per fixture.
 - `models/base.py` — `BasePredictor` ABC with `train(fixtures)`, `predict(fixture, history)`, `name`. All models must implement this.
 - `models/poisson.py` — `DixonColesPredictor`: MLE-trained Poisson model with DC correction (rho=-0.13) for low-score results. `train()` accepts `attack_prior`/`defence_prior` for Varianta C (cup leagues).
-- `models/calibrator.py` — `ProbabilityCalibrator`: isotonic regression per H/D/A, fitted via walk-forward backtest on API history. NaN predictions are filtered before fitting.
+- `models/calibrator.py` — `ProbabilityCalibrator`: isotonic regression per H/D/A; `GoalCalibrator`: isotonic regression na λ+μ → skutečné celkové góly (opravuje Poissonův bias nezávislosti). Oba fittovány v jednom walk-forward průchodu (`build_calibrators()`), NaN filtered.
 - `models/injury.py` — `InjuryAdjuster`: adjusts λ/μ for injuries. Uses `TYPE_CHECKING` guard for `PlayerInjury` import.
 - `betting/value.py` — `ValueBetDetector`: compares model probabilities to Bet365 implied odds. Edge threshold: 3%.
 - `backtesting/engine.py` — `BacktestEngine`: walk-forward simulation with periodic retrain. Reports accuracy, Brier score, log loss, and calibration.
@@ -48,7 +48,9 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - **Value bet focus**: the product is built around edge detection (model prob vs. implied odds), not raw outcome prediction.
 - Odds are fetched from Bet365 (bookmaker ID 11 in API-Football).
 - **enrich_with_statistics is NOT called globally** — it runs only inside `archive_resolved_fixtures`, scoped to the last 8 fixtures of teams being archived. DC model training does not need stats. This keeps GitHub Actions API calls at ~100-300 per run instead of 4500+.
-- **Calibration is independent of DB** — `build_calibrator()` uses only API history (thousands of samples). `resolved_fixture_predictions` is used only for the reliability diagram in the dashboard, not as a calibration input.
+- **Calibration is independent of DB** — `build_calibrators()` uses only API history (thousands of samples). `resolved_fixture_predictions` is used only for the reliability diagram in the dashboard, not as a calibration input.
+- **Dual calibration pipeline**: (1) `GoalCalibrator` scales λ/μ proportionally (zachovává ratio = relative team strength) tak, aby λ+μ odpovídalo empirickému průměru gólů → opravuje všechny goal markety najednou (over2.5, goals1-3, BTTS). (2) `ProbabilityCalibrator` isotonic regression na H/D/A probs navrch (nezávisle). Goal calibration probíhá před výpočtem `goal_probs`; H/D/A calibration po.
+- **Kalibrátor cache na disku** — `models/saved/calibrator_{league}_hda.joblib` + `_goals.joblib` + `_meta.json`. Přetrénuje se jen pokud přibylo ≥50 nových FT zápasů od posledního fitu. GitHub Actions cachuje `models/saved/` spolu s `cache/football.db`.
 
 ## Current stack
 
@@ -66,8 +68,10 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 
 ## Dashboard tabs (5)
 
-1. **Predikce** — HTML tabulka (responsivní: PC = logo+název, mobil = jen logo); sloupce H% D% A% O2.5 U2.5 G1-3 G2-4 BTTS_Y BTTS_N; zelená ≥65%; expandery s detailní analýzou + zranění + tracking. Tlačítko "📌 Sledovat" používá `st.toast()` (floating notifikace — přežije zavření expanderu po re-runu).
-2. **Sledované** — filtr liga/stav; `tracked_prob` (přidáno) vs `model_prob` (aktuální) + delta s 🟢🟡🔴; resolve button
+1. **Predikce** — HTML tabulka (responsivní: PC = logo+název, mobil = jen logo); sloupce H% D% A% O2.5 U2.5 G1-3 G2-4 BTTS_Y BTTS_N; zelená ≥65%. Pod tabulkou dvě sekce:
+   - **📌 Rychlé sledování** — pro každý zápas název zápasu + 2 řady tlačítek (`use_container_width=True`): řada 1: H D A (3 sloupce), řada 2: O2.5 U2.5 G1-3 G2-4 BTTS+ BTTS- (6 sloupců). Jeden klik = okamžité přidání, `st.toast()` potvrzení. Mobilně bezpečné (řada 1: ~125px/btn, řada 2: ~62px/btn).
+   - **Detailní analýza** — expandery s detailní analýzou + zranění + tracking. Tracking používá `st.form` (selectbox + `st.form_submit_button`) — selectbox nehlásí rerun, expander zůstane otevřený při změně výběru, rerun nastane až po kliknutí Sledovat.
+2. **Sledované** — filtr liga/stav; `tracked_prob` (přidáno) vs `model_prob` (aktuální) + delta s 🟢🟡🔴; resolve button. Vývoj pravděpodobnosti (sloupec Vývoj) se zobrazuje i u vyřešených predikcí — podmínka `r.correct is None` byla odstraněna (dashboard.py:1028).
 3. **Výsledky** — archiv resolved_fixture_predictions, accuracy modelu
 4. **Statistiky** — accuracy by type/league + reliability diagram
 5. **Tabulka** — `/standings` endpoint; přepínač Celková/Doma/Venku; responsivní HTML tabulka s logem každého týmu; desktop: # | logo | název | Z V R P | GF GA | +/- | Forma | Body; mobil: skryje název, GF, GA, Forma; Forma barevná (W=zelená, D=šedá, L=červená); TTL=24h
@@ -94,8 +98,8 @@ Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, 
 
 1. Phase 1: domestic leagues → train ensemble, collect `dc_all.attack/defence` as cup priors
 2. Phase 2: cup leagues → train with domestic priors as MLE x0 (Varianta C)
-3. Calibration: `build_calibrator()` — walk-forward dc_all on API history, isotonic regression, NaN filtered
-4. `archive_resolved_fixtures()` — for each league: check FT fixtures in DB, enrich only involved teams' recent fixtures (last 8), save to `resolved_fixture_predictions` with `features_json`
+3. Calibration: `build_calibrators()` — jeden walk-forward průchod dc_all; vrací `(ProbabilityCalibrator, GoalCalibrator)`; cachováno na disk, přetrénuje se jen při ≥50 nových zápasech
+4. `archive_resolved_fixtures()` — for each league: check FT fixtures v `completed` listu (bez extra API volání), batch DB check na již archivované, enrich only involved teams' recent fixtures (last 8), save to `resolved_fixture_predictions` with `features_json`
 5. DELETE stale rows + INSERT new upcoming predictions (calibrated probabilities)
 6. `update_tracked_probs()` — update `model_prob` for unresolved tracked_predictions
 
@@ -125,6 +129,9 @@ Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, 
 - SQLite CacheManager: `threading.Lock()` + WAL mode pro thread safety
 - `enrich_with_statistics()` voláno POUZE v `predict.py` (GitHub Actions s cache), NE v dashboardu (Streamlit Cloud nemá SQLite cache)
 - Kalibrované pravděpodobnosti jsou přímo uloženy v DB — dashboard čte bez další transformace
+- `expected_goals_home/away` v DB = goal-kalibrované λ/μ (po `GoalCalibrator.transform()`), ne raw ensemble výstup
+- `ensemble.py` `goal_probs` používá long-form klíče (`over2_5`, `goals1_3`, `btts_yes`, …) shodné s DB sloupci — `predict_from_lam_mu()` také. Žádná konverzní vrstva není potřeba.
+- GitHub Actions cache key: `predictor-cache-{os}-{run_id}`, restore prefix `predictor-cache-{os}-`. Cachuje `cache/football.db` + `models/saved/` (DC modely + kalibrátory).
 - `get_fixture_injuries()`: API-Football může vrátit stejného hráče vícekrát → `raw_by_team` je `Dict[int, Dict[int, dict]]` (klíč = player_id), deduplikace zabraňuje duplicitám v UI
 
 ## Bookmaker IDs (API Football)

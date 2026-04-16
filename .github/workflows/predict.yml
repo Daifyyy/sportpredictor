@@ -10,14 +10,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Cache API responses
+      - name: Cache API responses and calibrators
         uses: actions/cache@v4
         with:
-          path: cache/football.db
-          key: api-cache-${{ runner.os }}-${{ github.run_id }}
+          path: |
+            cache/football.db
+            models/saved
+          key: predictor-cache-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
-            api-cache-${{ runner.os }}-
-            api-cache-
+            predictor-cache-${{ runner.os }}-
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'

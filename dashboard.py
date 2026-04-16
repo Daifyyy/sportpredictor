@@ -150,6 +150,31 @@ def get_league_injuries(league_key: str) -> dict:
     return result
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_league_lineups(league_key: str) -> dict:
+    """Returns {fixture_id: {home: dict|None, away: dict|None}} for all upcoming fixtures.
+
+    lineup dict: {formation, coach, starters: [{player_id, player_name, number, pos}], substitutes: [...]}
+    TTL=30min — lineups announced ~1h before kickoff, empty before that.
+    """
+    from dataclasses import asdict
+
+    fetcher = get_fetcher()
+    cfg = settings.leagues[league_key]
+    upcoming = fetcher.get_upcoming_fixtures(cfg, next_n=10)
+    result = {}
+    for fx in upcoming:
+        try:
+            home_lu, away_lu = fetcher.get_fixture_lineups(fx)
+        except Exception:
+            home_lu, away_lu = None, None
+        result[fx.id] = {
+            "home": asdict(home_lu) if home_lu is not None else None,
+            "away": asdict(away_lu) if away_lu is not None else None,
+        }
+    return result
+
+
 @st.cache_data(ttl=86400, show_spinner="Načítám tabulku...")
 def fetch_standings(league_key: str) -> list:
     """Returns list of standings groups from API. TTL=24h — standings change only after a matchday."""
@@ -412,6 +437,159 @@ def render_injuries(
                 st.markdown(fmt_player(inj, away_goals))
         else:
             st.caption("Žádná hlášená zranění")
+
+
+_POS_ORDER = {"G": 0, "D": 1, "M": 2, "F": 3}
+_POS_LABEL = {"G": "Brankář", "D": "Obránci", "M": "Záložníci", "F": "Útočníci"}
+
+
+def render_lineups(
+    home_name: str, away_name: str,
+    home_lineup: dict | None, away_lineup: dict | None,
+) -> None:
+    """Render official starting lineups with formation and bench."""
+    if home_lineup is None and away_lineup is None:
+        return
+
+    st.caption("⚽ Sestavy")
+
+    def fmt_lineup(lu: dict | None, team_name: str) -> None:
+        if lu is None:
+            st.caption("Sestava ještě nebyla ohlášena")
+            return
+
+        formation = lu.get("formation") or "?"
+        coach = lu.get("coach") or "?"
+        st.markdown(f"**Rozestavení:** {formation}  ·  **Trenér:** {coach}")
+
+        starters = sorted(lu.get("starters", []), key=lambda p: _POS_ORDER.get(p["pos"], 9))
+
+        # Group by position
+        current_pos = None
+        for p in starters:
+            pos = p.get("pos", "?")
+            if pos != current_pos:
+                current_pos = pos
+                st.markdown(f"*{_POS_LABEL.get(pos, pos)}*")
+            num = p.get("number") or ""
+            st.markdown(f"&nbsp;&nbsp;{num}. {p['player_name']}")
+
+        subs = lu.get("substitutes", [])
+        if subs:
+            st.markdown("*Náhradníci*")
+            names = ", ".join(
+                f"{p.get('number') or ''}. {p['player_name']}" for p in subs
+            )
+            st.caption(names)
+
+    col_h, col_a = st.columns(2)
+    with col_h:
+        st.markdown(f"**🏠 {home_name}**")
+        fmt_lineup(home_lineup, home_name)
+    with col_a:
+        st.markdown(f"**✈️ {away_name}**")
+        fmt_lineup(away_lineup, away_name)
+
+
+def render_prediction_stats(fx_data: dict, feats: dict) -> None:
+    """Render predicted match statistics as a dual-bar visual comparison (similar to live match stats screens).
+
+    Always shows: xG, goals/game, form pts/game, home/away form, attack strength, season PPG, Elo.
+    Conditionally shows shots/corners if enrich_with_statistics data is available.
+    """
+    if not feats:
+        return
+
+    home = fx_data["home_team"]
+    away = fx_data["away_team"]
+    lam = fx_data.get("expected_goals_home")
+    mu = fx_data.get("expected_goals_away")
+
+    def row(label: str, h, a, fmt: str = "{:.1f}"):
+        if h is None or a is None:
+            return None
+        try:
+            h, a = float(h), float(a)
+        except (TypeError, ValueError):
+            return None
+        return (label, h, a, fmt)
+
+    rows = []
+    if lam is not None and mu is not None:
+        rows.append(("xG (očekávané góly)", float(lam), float(mu), "{:.2f}"))
+
+    r = row("Góly vstřelené / zápas", feats.get("home_gf"), feats.get("away_gf"))
+    if r: rows.append(r)
+
+    r = row("Forma — body / zápas", feats.get("home_form"), feats.get("away_form"))
+    if r: rows.append(r)
+
+    r = row("Forma doma / venku", feats.get("home_venue_form"), feats.get("away_venue_form"))
+    if r: rows.append(r)
+
+    r = row("Útočná síla (index)", feats.get("home_attack_str"), feats.get("away_attack_str"), "{:.2f}")
+    if r: rows.append(r)
+
+    r = row("Sezónní PPG", feats.get("home_season_ppg"), feats.get("away_season_ppg"), "{:.2f}")
+    if r: rows.append(r)
+
+    # Elo: raw values are ~1300-1800, percentages still meaningful
+    r = row("Elo rating", feats.get("elo_home"), feats.get("elo_away"), "{:.0f}")
+    if r: rows.append(r)
+
+    # Stats-enriched features — only present when enrich_with_statistics ran (GitHub Actions cache)
+    r = row("Střely na bránu (prům.)", feats.get("home_avg_shots_on_target"), feats.get("away_avg_shots_on_target"))
+    if r: rows.append(r)
+
+    r = row("Střely celkem (prům.)", feats.get("home_avg_total_shots"), feats.get("away_avg_total_shots"))
+    if r: rows.append(r)
+
+    r = row("Rohy (prům.)", feats.get("home_avg_corners"), feats.get("away_avg_corners"))
+    if r: rows.append(r)
+
+    if not rows:
+        return
+
+    HC = "#00c9a7"   # teal — home
+    AC = "#ff6b6b"   # coral — away
+
+    html_rows = []
+    for label, h_val, a_val, fmt in rows:
+        total = h_val + a_val
+        h_pct = (h_val / total * 100) if total > 0 else 50.0
+        a_pct = 100.0 - h_pct
+        h_str = fmt.format(h_val)
+        a_str = fmt.format(a_val)
+        html_rows.append(
+            f'<div style="display:grid;grid-template-columns:58px 1fr 148px 1fr 58px;'
+            f'align-items:center;padding:5px 0;border-bottom:1px solid #2d2d2d;">'
+            f'<div style="text-align:right;font-weight:600;font-size:0.88rem;color:{HC};padding-right:6px;">{h_str}</div>'
+            f'<div style="display:flex;justify-content:flex-end;">'
+            f'<div style="width:{h_pct:.1f}%;height:7px;background:{HC};border-radius:3px 0 0 3px;min-width:3px;"></div>'
+            f'</div>'
+            f'<div style="text-align:center;font-size:0.77rem;color:#9a9a9a;padding:0 8px;">{label}</div>'
+            f'<div>'
+            f'<div style="width:{a_pct:.1f}%;height:7px;background:{AC};border-radius:0 3px 3px 0;min-width:3px;"></div>'
+            f'</div>'
+            f'<div style="text-align:left;font-weight:600;font-size:0.88rem;color:{AC};padding-left:6px;">{a_str}</div>'
+            f'</div>'
+        )
+
+    header = (
+        f'<div style="display:grid;grid-template-columns:58px 1fr 148px 1fr 58px;padding:6px 0 8px 0;">'
+        f'<div></div>'
+        f'<div style="text-align:right;font-size:0.85rem;font-weight:700;color:{HC};padding-right:6px;">🏠 {home}</div>'
+        f'<div></div>'
+        f'<div style="font-size:0.85rem;font-weight:700;color:{AC};padding-left:6px;">✈️ {away}</div>'
+        f'<div></div>'
+        f'</div>'
+    )
+
+    st.caption("📊 Predikce průběhu zápasu")
+    st.markdown(
+        f'<div style="margin:4px 0 12px 0;">{header}{"".join(html_rows)}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def generate_ai_analysis(fx: dict, feats: dict, league_avg: dict, inj_data: dict) -> str:
@@ -883,21 +1061,59 @@ with tab_pred:
 </tr></thead><tbody>{"".join(rows_html)}</tbody></table>
 </div>""", unsafe_allow_html=True)
 
+        # ── Rychlé sledování ────────────────────────────────────────────────
+        st.subheader("📌 Rychlé sledování")
+        _QUICK_BTNS_ROW1 = [("H", "H"), ("D", "D"), ("A", "A")]
+        _QUICK_BTNS_ROW2 = [
+            ("O2.5", "Over2.5"), ("U2.5", "Under2.5"),
+            ("G1-3", "Goals1-3"), ("G2-4", "Goals2-4"),
+            ("BTTS+", "BTTS_Yes"), ("BTTS-", "BTTS_No"),
+        ]
+        for fx in fixtures:
+            st.caption(f"{fx['home_team']} vs {fx['away_team']}")
+            _r1 = st.columns(3)
+            for _qi, (_qlabel, _qtype) in enumerate(_QUICK_BTNS_ROW1):
+                with _r1[_qi]:
+                    if st.button(_qlabel, key=f"qs_{_qtype}_{fx['fixture_id']}", use_container_width=True):
+                        _qresult = save_tracking(fx, league, _qtype, None)
+                        if _qresult == "ok":
+                            st.toast(f"✅ {_qlabel} · {fx['home_team']} vs {fx['away_team']}", icon="📌")
+                        elif _qresult == "duplicate":
+                            st.toast("⚠️ Již sledováno.", icon="⚠️")
+                        else:
+                            st.toast("❌ Chyba při ukládání.", icon="❌")
+            _r2 = st.columns(6)
+            for _qi, (_qlabel, _qtype) in enumerate(_QUICK_BTNS_ROW2):
+                with _r2[_qi]:
+                    if st.button(_qlabel, key=f"qs_{_qtype}_{fx['fixture_id']}", use_container_width=True):
+                        _qresult = save_tracking(fx, league, _qtype, None)
+                        if _qresult == "ok":
+                            st.toast(f"✅ {_qlabel} · {fx['home_team']} vs {fx['away_team']}", icon="📌")
+                        elif _qresult == "duplicate":
+                            st.toast("⚠️ Již sledováno.", icon="⚠️")
+                        else:
+                            st.toast("❌ Chyba při ukládání.", icon="❌")
+
         # ── Detailní analýza (expandery) ────────────────────────────────────
         st.subheader("Detailní analýza")
-        with st.spinner("Načítám statistiky a zranění..."):
+        with st.spinner("Načítám statistiky, zranění a sestavy..."):
             features_by_id, league_avg = get_league_features(league)
             injuries_by_id = get_league_injuries(league)
+            lineups_by_id = get_league_lineups(league)
 
         for fx in fixtures:
             home = fx["home_team"]
             away = fx["away_team"]
             date_str = fx["date"][:16].replace("T", " ")
             inj_data = injuries_by_id.get(fx["fixture_id"], {})
+            lu_data = lineups_by_id.get(fx["fixture_id"], {})
             has_injuries = bool(inj_data.get("home") or inj_data.get("away"))
-            label = f"📅 {date_str}  ·  {home} vs {away}" + ("  🚑" if has_injuries else "")
+            has_lineups = bool(lu_data.get("home") or lu_data.get("away"))
+            suffix = ("  🚑" if has_injuries else "") + ("  ⚽" if has_lineups else "")
+            label = f"📅 {date_str}  ·  {home} vs {away}" + suffix
             with st.expander(label):
                 feats = features_by_id.get(fx["fixture_id"], {})
+                render_prediction_stats(fx, feats)
                 render_match_detail(fx, feats, league_avg)
                 render_bet_validation(fx, feats)
 
@@ -909,17 +1125,25 @@ with tab_pred:
                     inj_data.get("away_goals", 50),
                 )
 
+                render_lineups(
+                    home, away,
+                    lu_data.get("home"),
+                    lu_data.get("away"),
+                )
+
                 st.divider()
-                tr_col1, tr_col2 = st.columns([3, 1])
-                with tr_col1:
-                    track_type = st.selectbox(
-                        "Typ predikce ke sledování",
-                        PREDICTION_TYPES,
-                        key=f"track_type_{fx['fixture_id']}",
-                    )
-                with tr_col2:
-                    st.write("")
-                    if st.button("📌 Sledovat", key=f"track_btn_{fx['fixture_id']}"):
+                with st.form(key=f"track_form_{fx['fixture_id']}"):
+                    tr_col1, tr_col2 = st.columns([3, 1])
+                    with tr_col1:
+                        track_type = st.selectbox(
+                            "Typ predikce ke sledování",
+                            PREDICTION_TYPES,
+                            key=f"track_type_{fx['fixture_id']}",
+                        )
+                    with tr_col2:
+                        st.write("")
+                        submitted = st.form_submit_button("📌 Sledovat")
+                    if submitted:
                         result = save_tracking(fx, league, track_type, None)
                         if result == "ok":
                             st.toast("✅ Přidáno ke sledování.", icon="📌")
@@ -990,7 +1214,7 @@ with tab_tracked:
             # Probability drift: tracked_prob (at time of adding) vs model_prob (latest recalc)
             tracked = getattr(r, "tracked_prob", None)
             current = r.model_prob
-            if r.correct is None and tracked is not None and current is not None:
+            if tracked is not None and current is not None:
                 delta = (current - tracked) * 100
                 if abs(delta) >= 1:
                     icon = "🟢" if delta >= 3 else ("🔴" if delta <= -3 else "🟡")

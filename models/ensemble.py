@@ -93,11 +93,12 @@ class EnsembleDCPredictor:
         btts = float(sum(prob_matrix[i, j] for i in range(1, max_g) for j in range(1, max_g)))
 
         goal_probs = {
-            "u2.5": round(float(tg[:3].sum()), 4),
-            "o2.5": round(float(tg[3:].sum()), 4),
-            "1-3":  round(float(tg[1:4].sum()), 4),
-            "2-4":  round(float(tg[2:5].sum()), 4),
-            "btts": round(btts, 4),
+            "over2_5":  round(float(tg[3:].sum()), 4),
+            "under2_5": round(float(tg[:3].sum()), 4),
+            "goals1_3": round(float(tg[1:4].sum()), 4),
+            "goals2_4": round(float(tg[2:5].sum()), 4),
+            "btts_yes": round(btts, 4),
+            "btts_no":  round(1 - btts, 4),
         }
 
         return Prediction(

@@ -26,6 +26,7 @@ class CacheTTL:
     fixtures: int = 3600       # 1h  — upcoming/current season fixtures
     team_stats: int = 86400    # 24h — teams/statistics, player season stats (updated after each matchday)
     injuries: int = 10800      # 3h  — injury reports (updated from press conferences, not real-time)
+    lineups: int = 1800        # 30min — announced ~1h before kickoff, empty before that
     odds: int = 900            # 15min
     static: int = 604800       # 7 dní
     historical: int = -1       # nikdy neexpiruje — FT match data never changes

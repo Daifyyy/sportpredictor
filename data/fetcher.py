@@ -1,8 +1,8 @@
-from typing import List, Dict, Tuple
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from api.client import APIClient
 from config.settings import Settings, LeagueConfig
-from data.models import Fixture, FixtureStats, PlayerInjury, Team, MatchResult, Odds
+from data.models import Fixture, FixtureLineup, FixtureStats, LineupPlayer, PlayerInjury, Team, MatchResult, Odds
 
 
 class FootballFetcher:
@@ -197,6 +197,58 @@ class FootballFetcher:
         response = data.get("response", {})
         total = response.get("goals", {}).get("for", {}).get("total", {}).get("total")
         return int(total) if total else 50
+
+    def get_fixture_lineups(
+        self, fixture: Fixture
+    ) -> Tuple[Optional[FixtureLineup], Optional[FixtureLineup]]:
+        """Fetch official lineups for a fixture. Announced ~1h before kickoff.
+
+        Returns (home_lineup, away_lineup). Either may be None if not yet announced.
+        TTL=30min so empty pre-announcement responses are refreshed regularly.
+        """
+        data = self.client.get("fixtures/lineups", {"fixture": fixture.id}, ttl=self.ttl.lineups)
+        if not data or not data.get("response"):
+            return None, None
+
+        home_id = fixture.home_team.id
+        away_id = fixture.away_team.id
+        lineups: Dict[int, FixtureLineup] = {}
+
+        for entry in data["response"]:
+            team_id = entry["team"]["id"]
+            formation = entry.get("formation") or ""
+            coach = entry.get("coach", {}).get("name") or ""
+
+            starters = [
+                LineupPlayer(
+                    player_id=p["player"]["id"],
+                    player_name=p["player"]["name"],
+                    number=p["player"].get("number") or 0,
+                    pos=p["player"].get("pos") or "?",
+                    is_starter=True,
+                )
+                for p in entry.get("startXI", [])
+            ]
+            substitutes = [
+                LineupPlayer(
+                    player_id=p["player"]["id"],
+                    player_name=p["player"]["name"],
+                    number=p["player"].get("number") or 0,
+                    pos=p["player"].get("pos") or "?",
+                    is_starter=False,
+                )
+                for p in entry.get("substitutes", [])
+            ]
+
+            lineups[team_id] = FixtureLineup(
+                team_id=team_id,
+                formation=formation,
+                coach=coach,
+                starters=starters,
+                substitutes=substitutes,
+            )
+
+        return lineups.get(home_id), lineups.get(away_id)
 
     def get_standings(self, league: LeagueConfig) -> list:
         """Returns list of standings tables (1 for domestic leagues, multiple for cup groups).

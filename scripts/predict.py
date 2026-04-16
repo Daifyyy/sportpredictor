@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import joblib
 import numpy as np
 from scipy.stats import poisson
 
@@ -22,7 +23,7 @@ from data.models import Prediction
 from db.models import Base, FixturePrediction, ResolvedFixturePrediction, TrackedPrediction
 from db.session import SessionLocal, engine
 from features.engineer import FeatureEngineer
-from models.calibrator import ProbabilityCalibrator
+from models.calibrator import GoalCalibrator, ProbabilityCalibrator
 from models.ensemble import CUP_LEAGUES, EnsembleDCPredictor
 from models.injury import InjuryAdjuster
 from models.poisson import DixonColesPredictor
@@ -41,7 +42,7 @@ def predict_from_lam_mu(fixture_id: int, lam: float, mu: float, rho: float) -> P
     """Recompute a Prediction from injury-adjusted λ/μ with DC correction.
 
     Mirrors EnsembleDCPredictor.predict() but skips model blending — takes
-    final λ/μ directly. goal_probs keys match compute_goal_probs() for consistency.
+    final λ/μ directly. goal_probs uses long-form keys (over2_5, goals1_3, …).
     """
     max_g = 10
     prob_matrix = np.outer(
@@ -82,25 +83,6 @@ def predict_from_lam_mu(fixture_id: int, lam: float, mu: float, rho: float) -> P
         },
     )
 
-
-def compute_goal_probs(lam: float, mu: float) -> dict:
-    max_g = 10
-    h_pmf = poisson.pmf(range(max_g), lam)
-    a_pmf = poisson.pmf(range(max_g), mu)
-    mat = np.outer(h_pmf, a_pmf)
-    tg = np.zeros(max_g * 2 - 1)
-    for i in range(max_g):
-        for j in range(max_g):
-            tg[i + j] += mat[i, j]
-    btts = float(sum(mat[i, j] for i in range(1, max_g) for j in range(1, max_g)))
-    return {
-        "over2_5": round(float(tg[3:].sum()), 4),
-        "under2_5": round(float(tg[:3].sum()), 4),
-        "goals1_3": round(float(tg[1:4].sum()), 4),
-        "goals2_4": round(float(tg[2:5].sum()), 4),
-        "btts_yes": round(btts, 4),
-        "btts_no": round(1 - btts, 4),
-    }
 
 
 def train_ensemble(
@@ -168,30 +150,30 @@ def archive_resolved_fixtures(db, fetcher: "FootballFetcher", league_key: str, c
     now = datetime.now(timezone.utc)
     to_archive = []
 
+    # Build lookup from already-fetched completed history — avoids one API call per fixture
+    fixture_by_id = {f.id: f for f in completed}
+
+    # Batch-check already-archived IDs to avoid N+1 DB queries
+    candidate_ids = [row.fixture_id for row in existing if row.match_date <= now]
+    already_archived = {
+        r.fixture_id
+        for r in db.query(ResolvedFixturePrediction.fixture_id).filter(
+            ResolvedFixturePrediction.fixture_id.in_(candidate_ids)
+        ).all()
+    }
+
     for row in existing:
         if row.match_date > now:
             continue  # Not played yet
-        already = db.query(ResolvedFixturePrediction).filter(
-            ResolvedFixturePrediction.fixture_id == row.fixture_id
-        ).first()
-        if already:
+        if row.fixture_id in already_archived:
             continue
-        data = fetcher.client.get("fixtures", {"id": row.fixture_id}, ttl=3600)
-        if not data:
-            continue
-        resp = data.get("response", [])
-        if not resp:
-            continue
-        raw = resp[0]
-        status = raw["fixture"]["status"]["short"]
-        goals = raw.get("goals", {})
-        if status == "FT" and goals.get("home") is not None and goals.get("away") is not None:
-            to_archive.append((row, int(goals["home"]), int(goals["away"])))
+        fx = fixture_by_id.get(row.fixture_id)
+        if fx is None or fx.result is None:
+            continue  # Not in FT history or result missing
+        to_archive.append((row, fx.result.home_goals, fx.result.away_goals))
 
     if not to_archive:
         return 0
-
-    fixture_by_id = {f.id: f for f in completed}
 
     # Targeted enrichment: fetch stats only for recent fixtures of teams being archived.
     # Avoids fetching stats for all 1000+ historical matches — stats are optional in features.
@@ -291,17 +273,23 @@ def update_tracked_probs(db, saved: dict) -> int:
     return updated
 
 
-def build_calibrator(completed, league_key: str, min_train: int = 100, retrain_every: int = 50) -> ProbabilityCalibrator | None:
-    """Walk-forward calibration data collection using dc_all only (fast).
+def build_calibrators(
+    completed, min_train: int = 100, retrain_every: int = 50
+) -> tuple[ProbabilityCalibrator | None, GoalCalibrator | None]:
+    """Walk-forward calibration using dc_all only (single pass for both calibrators).
 
     Retrains dc_all every `retrain_every` matches, predicts the next fixture.
-    Collects out-of-sample (prob_H, prob_D, prob_A, actual) pairs, then fits
-    an isotonic regression calibrator. Returns None if < 80 samples collected.
+    Collects out-of-sample samples for:
+      - ProbabilityCalibrator: (prob_H, prob_D, prob_A, actual_outcome)
+      - GoalCalibrator:        (λ+μ, actual_total_goals)
+
+    Returns (None, None) if < 80 samples collected.
     """
     if len(completed) < min_train + 30:
-        return None
+        return None, None
 
     samples_ph, samples_pd, samples_pa, actuals = [], [], [], []
+    predicted_totals, actual_totals = [], []
     model: DixonColesPredictor | None = None
 
     for i in range(min_train, len(completed)):
@@ -316,7 +304,9 @@ def build_calibrator(completed, league_key: str, min_train: int = 100, retrain_e
         except Exception:
             continue
 
-        if np.isnan(pred.prob_home) or np.isnan(pred.prob_draw) or np.isnan(pred.prob_away):
+        lam = pred.expected_goals_home
+        mu = pred.expected_goals_away
+        if any(np.isnan(v) for v in (pred.prob_home, pred.prob_draw, pred.prob_away, lam, mu)):
             continue
 
         samples_ph.append(pred.prob_home)
@@ -324,12 +314,19 @@ def build_calibrator(completed, league_key: str, min_train: int = 100, retrain_e
         samples_pa.append(pred.prob_away)
         actuals.append(fx.result.outcome)
 
-    if len(actuals) < 80:
-        return None
+        predicted_totals.append(lam + mu)
+        actual_totals.append(fx.result.home_goals + fx.result.away_goals)
 
-    cal = ProbabilityCalibrator()
-    cal.fit(samples_ph, samples_pd, samples_pa, actuals)
-    return cal
+    if len(actuals) < 80:
+        return None, None
+
+    prob_cal = ProbabilityCalibrator()
+    prob_cal.fit(samples_ph, samples_pd, samples_pa, actuals)
+
+    goal_cal = GoalCalibrator()
+    goal_cal.fit(predicted_totals, actual_totals)
+
+    return prob_cal, goal_cal
 
 
 def main():
@@ -379,16 +376,46 @@ def main():
                 continue
             cup_results[league_key] = (completed, model)
 
-        # Build per-league calibrators from walk-forward backtest on historical data
-        print("\n[Calibration] Fitting isotonic regression calibrators...")
+        # Build per-league calibrators — load from disk cache if < 50 new matches since last fit
+        print("\n[Calibration] Fitting calibrators (H/D/A + goals)...")
         calibrators: dict[str, ProbabilityCalibrator | None] = {}
+        goal_calibrators: dict[str, GoalCalibrator | None] = {}
+
         for league_key, (completed, _) in {**domestic_results, **cup_results}.items():
-            cal = build_calibrator(completed, league_key)
-            calibrators[league_key] = cal
-            if cal:
-                print(f"  {settings.leagues[league_key].name}: {cal.n_samples} samples | ECE {cal.ece_before:.4f} → {cal.ece_after:.4f}")
-            else:
-                print(f"  {settings.leagues[league_key].name}: not enough samples, skipping")
+            hda_path  = MODELS_DIR / f"calibrator_{league_key}_hda.joblib"
+            goal_path = MODELS_DIR / f"calibrator_{league_key}_goals.joblib"
+            meta_path = MODELS_DIR / f"calibrator_{league_key}_meta.json"
+            n_completed = len(completed)
+            prob_cal = goal_cal = None
+
+            if hda_path.exists() and goal_path.exists() and meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text())
+                    new_matches = n_completed - meta.get("n_completed", 0)
+                    if new_matches < 50:
+                        prob_cal = joblib.load(hda_path)
+                        goal_cal = joblib.load(goal_path)
+                        print(f"  {settings.leagues[league_key].name}: loaded from cache (+{new_matches} new matches)")
+                except Exception:
+                    pass  # corrupted cache — fall through to retrain
+
+            if prob_cal is None:
+                prob_cal, goal_cal = build_calibrators(completed)
+                if prob_cal:
+                    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+                    joblib.dump(prob_cal, hda_path)
+                    joblib.dump(goal_cal, goal_path)
+                    meta_path.write_text(json.dumps({"n_completed": n_completed}))
+                    print(
+                        f"  {settings.leagues[league_key].name}: {prob_cal.n_samples} samples"
+                        f" | ECE {prob_cal.ece_before:.4f}→{prob_cal.ece_after:.4f}"
+                        f" | goal bias {goal_cal.mean_bias:+.3f} xG"
+                    )
+                else:
+                    print(f"  {settings.leagues[league_key].name}: not enough samples, skipping")
+
+            calibrators[league_key] = prob_cal
+            goal_calibrators[league_key] = goal_cal
 
         # Save predictions for all leagues
         all_results = {**domestic_results, **cup_results}
@@ -411,7 +438,8 @@ def main():
 
             print(f"\n[{cfg.name}] Computing predictions for {len(upcoming)} upcoming fixtures...")
 
-            cal = calibrators.get(league_key)
+            prob_cal = calibrators.get(league_key)
+            goal_cal = goal_calibrators.get(league_key)
 
             saved_predictions: dict = {}  # fixture_id -> FixturePrediction, for tracked prob update
             for fx in upcoming:
@@ -433,13 +461,21 @@ def main():
                     )
                     print(f"    Injuries: {', '.join(inj_names)} | λ {lam_orig:.2f}→{lam_adj:.2f} μ {mu_orig:.2f}→{mu_adj:.2f}")
 
-                # Apply isotonic calibration if available
-                if cal is not None:
-                    ph, pd_val, pa = cal.transform(pred.prob_home, pred.prob_draw, pred.prob_away)
+                # Goal calibration: scale λ/μ proportionally to match empirical total goals
+                # Corrects Poisson independence bias (model overcounts goals vs reality)
+                lam_final = pred.expected_goals_home
+                mu_final = pred.expected_goals_away
+                if goal_cal is not None:
+                    lam_final, mu_final = goal_cal.transform(lam_final, mu_final)
+                    gp = predict_from_lam_mu(fx.id, lam_final, mu_final, model.dc_all.rho).goal_probs
+                else:
+                    gp = pred.goal_probs
+
+                # H/D/A isotonic calibration (independent of goal calibration)
+                if prob_cal is not None:
+                    ph, pd_val, pa = prob_cal.transform(pred.prob_home, pred.prob_draw, pred.prob_away)
                 else:
                     ph, pd_val, pa = pred.prob_home, pred.prob_draw, pred.prob_away
-
-                gp = compute_goal_probs(pred.expected_goals_home, pred.expected_goals_away)
 
                 row = FixturePrediction(
                     fixture_id=fx.id,
@@ -458,12 +494,12 @@ def main():
                     goals2_4=gp["goals2_4"],
                     btts_yes=gp["btts_yes"],
                     btts_no=gp["btts_no"],
-                    expected_goals_home=round(pred.expected_goals_home, 3),
-                    expected_goals_away=round(pred.expected_goals_away, 3),
+                    expected_goals_home=round(lam_final, 3),
+                    expected_goals_away=round(mu_final, 3),
                 )
                 db.add(row)
                 saved_predictions[fx.id] = row
-                print(f"  {fx.home_team.name} vs {fx.away_team.name} | H:{pred.prob_home:.0%} D:{pred.prob_draw:.0%} A:{pred.prob_away:.0%} | λ={pred.expected_goals_home:.2f} μ={pred.expected_goals_away:.2f}")
+                print(f"  {fx.home_team.name} vs {fx.away_team.name} | H:{ph:.0%} D:{pd_val:.0%} A:{pa:.0%} | λ={lam_final:.2f} μ={mu_final:.2f}")
 
             db.commit()
             print(f"  Saved {len(upcoming)} predictions.")

@@ -1,11 +1,51 @@
 """
-Isotonic regression calibrator for H/D/A match outcome probabilities.
+Calibrators for football match predictions.
 
-Calibrates each outcome class independently, then renormalizes to sum to 1.
-Fit on out-of-sample (walk-forward) predictions to avoid overfitting.
+ProbabilityCalibrator — isotonic regression on H/D/A outcome probabilities.
+GoalCalibrator        — isotonic regression on λ+μ → actual total goals.
+                        Corrects the Poisson independence bias: real football
+                        has negative goal correlation (teams defend more when
+                        trailing) → actual totals are lower than λ+μ predicts.
+
+Both are fit on out-of-sample (walk-forward) predictions to avoid overfitting.
 """
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
+
+
+class GoalCalibrator:
+    """Calibrates predicted total goals (λ+μ) to match empirical distribution.
+
+    Preserves the λ/μ ratio (relative team strength) — only scales the total.
+    transform(lam, mu) → (lam_cal, mu_cal) with lam_cal + mu_cal = calibrated total.
+    """
+
+    def __init__(self):
+        self._ir = IsotonicRegression(out_of_bounds="clip")
+        self._fitted = False
+        self.n_samples = 0
+        self.mean_bias: float = 0.0  # avg(predicted) - avg(actual), positive = model overcounts
+
+    def fit(self, predicted_totals, actual_totals) -> None:
+        x = np.array(predicted_totals, dtype=float)
+        y = np.array(actual_totals, dtype=float)
+        self._ir.fit(x, y)
+        self._fitted = True
+        self.n_samples = len(y)
+        self.mean_bias = round(float(x.mean() - y.mean()), 4)
+
+    def transform(self, lam: float, mu: float) -> tuple[float, float]:
+        """Scale λ/μ proportionally so λ+μ matches calibrated expected total."""
+        if not self._fitted:
+            return lam, mu
+        total = lam + mu
+        if total <= 0:
+            return lam, mu
+        cal_total = float(self._ir.predict([total])[0])
+        if cal_total <= 0:
+            return lam, mu
+        scale = cal_total / total
+        return lam * scale, mu * scale
 
 
 class ProbabilityCalibrator:

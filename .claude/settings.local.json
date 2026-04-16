@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(python:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "WebFetch(domain:www.api-football.com)",
+      "WebSearch",
+      "WebFetch(domain:api-sports.io)",
+      "WebFetch(domain:dashboard.api-football.com)",
+      "WebFetch(domain:rapidapi.com)"
     ]
   }
 }

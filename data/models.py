@@ -59,6 +59,24 @@ class PlayerInjury:
 
 
 @dataclass
+class LineupPlayer:
+    player_id: int
+    player_name: str
+    number: int
+    pos: str        # "G", "D", "M", "F"
+    is_starter: bool
+
+
+@dataclass
+class FixtureLineup:
+    team_id: int
+    formation: str          # e.g. "4-2-3-1"
+    coach: str
+    starters: List["LineupPlayer"]
+    substitutes: List["LineupPlayer"]
+
+
+@dataclass
 class Odds:
     fixture_id: int
     bookmaker: str
