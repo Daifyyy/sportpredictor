@@ -183,6 +183,54 @@ def fetch_standings(league_key: str) -> list:
     return fetcher.get_standings(cfg)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_prob_changes(min_delta: float = 0.02) -> list:
+    """Returns list of fixtures with significant H/D/A probability changes since last predict run.
+
+    Only includes rows where prev_prob_home IS NOT NULL (populated after first run post-ALTER TABLE).
+    Sorted by max absolute delta descending. min_delta=0.02 = 2 percentage points.
+    """
+    try:
+        with get_db() as db:
+            rows = (
+                db.query(FixturePrediction)
+                .filter(FixturePrediction.prev_prob_home.isnot(None))
+                .order_by(FixturePrediction.match_date)
+                .all()
+            )
+    except Exception:
+        return []
+
+    result = []
+    for r in rows:
+        dh = r.prob_home - r.prev_prob_home
+        dd = r.prob_draw - r.prev_prob_draw
+        da = r.prob_away - r.prev_prob_away
+        max_delta = max(abs(dh), abs(dd), abs(da))
+        if max_delta < min_delta:
+            continue
+        result.append({
+            "fixture_id": r.fixture_id,
+            "league": r.league,
+            "home_team": r.home_team,
+            "away_team": r.away_team,
+            "match_date": r.match_date,
+            "prob_home": r.prob_home,
+            "prob_draw": r.prob_draw,
+            "prob_away": r.prob_away,
+            "prev_prob_home": r.prev_prob_home,
+            "prev_prob_draw": r.prev_prob_draw,
+            "prev_prob_away": r.prev_prob_away,
+            "delta_home": dh,
+            "delta_draw": dd,
+            "delta_away": da,
+            "max_delta": max_delta,
+            "prev_computed_at": r.prev_computed_at,
+        })
+
+    return sorted(result, key=lambda x: x["max_delta"], reverse=True)
+
+
 def _fv(val, fmt=".2f") -> str:
     if isinstance(val, (int, float)):
         try:
@@ -1149,6 +1197,72 @@ with tab_pred:
                         )
                 if ai_key in st.session_state:
                     st.markdown(st.session_state[ai_key])
+
+
+# ── Největší pohyby ────────────────────────────────────────────────────────────
+
+with tab_pred:
+    st.divider()
+    st.subheader("📈 Největší pohyby od posledního přepočtu")
+
+    changes = get_prob_changes(min_delta=0.02)
+
+    if not changes:
+        st.caption("Žádné výrazné změny — data budou dostupná od druhého běhu GitHub Actions po nasazení.")
+    else:
+        ref_time = changes[0].get("prev_computed_at")
+        if ref_time:
+            st.caption(f"Porovnání s přepočtem: {ref_time.strftime('%d.%m.%Y %H:%M')} UTC · zobrazeny změny ≥ 2 %")
+
+        def _delta_html(val: float, delta: float) -> str:
+            pct = f"{val * 100:.0f}%"
+            if abs(delta) < 0.005:
+                return f'<span style="color:inherit">{pct}</span>'
+            sign = "+" if delta > 0 else ""
+            color = "#4ade80" if delta > 0 else "#f87171"
+            return (
+                f'<span style="color:inherit">{pct}</span>'
+                f'<span style="color:{color};font-size:0.78rem;margin-left:4px">'
+                f'({sign}{delta * 100:.0f}%)</span>'
+            )
+
+        rows_html = []
+        for c in changes[:15]:
+            flag = flags.get(settings.leagues[c["league"]].country, "")
+            liga = f"{flag} {settings.leagues[c['league']].name}"
+            date_s = c["match_date"].strftime("%d.%m") if c["match_date"] else ""
+            max_d = c["max_delta"]
+            badge_color = "#4ade80" if max_d >= 0.08 else "#facc15" if max_d >= 0.04 else "#94a3b8"
+            rows_html.append(
+                f"<tr>"
+                f"<td style='text-align:left;color:#9a9a9a;font-size:0.78rem;white-space:nowrap'>{liga}</td>"
+                f"<td style='text-align:left;white-space:nowrap'>{c['home_team']} vs {c['away_team']}</td>"
+                f"<td style='color:#9a9a9a;font-size:0.82rem'>{date_s}</td>"
+                f"<td>{_delta_html(c['prob_home'], c['delta_home'])}</td>"
+                f"<td>{_delta_html(c['prob_draw'], c['delta_draw'])}</td>"
+                f"<td>{_delta_html(c['prob_away'], c['delta_away'])}</td>"
+                f"<td style='font-weight:700;color:{badge_color}'>{max_d * 100:.0f}%</td>"
+                f"</tr>"
+            )
+
+        st.markdown(f"""
+<style>
+.chg{{width:100%;border-collapse:collapse;font-size:14px}}
+.chg th,.chg td{{padding:5px 10px;border-bottom:1px solid #2a2a2a;text-align:center}}
+.chg th{{color:#aaa;font-size:11px;font-weight:600;text-transform:uppercase}}
+</style>
+<div style="overflow-x:auto">
+<table class="chg">
+<thead><tr>
+  <th style="text-align:left">Liga</th>
+  <th style="text-align:left">Zápas</th>
+  <th>Datum</th>
+  <th>H%</th><th>D%</th><th>A%</th>
+  <th>Max Δ</th>
+</tr></thead>
+<tbody>{"".join(rows_html)}</tbody>
+</table>
+</div>""", unsafe_allow_html=True)
 
 
 # ── TAB 2: Sledované predikce ──────────────────────────────────────────────────

@@ -427,6 +427,11 @@ def main():
             if archived:
                 print(f"  → Archived {archived} resolved fixture(s)")
 
+            # Capture current predictions as prev_ before overwriting (change tracking)
+            prev_vals: dict = {}
+            for r in db.query(FixturePrediction).filter(FixturePrediction.league == league_key).all():
+                prev_vals[r.fixture_id] = (r.prob_home, r.prob_draw, r.prob_away, r.computed_at)
+
             # Delete stale rows for this league
             db.query(FixturePrediction).filter(FixturePrediction.league == league_key).delete()
 
@@ -477,6 +482,7 @@ def main():
                 else:
                     ph, pd_val, pa = pred.prob_home, pred.prob_draw, pred.prob_away
 
+                prev = prev_vals.get(fx.id)
                 row = FixturePrediction(
                     fixture_id=fx.id,
                     league=league_key,
@@ -496,6 +502,10 @@ def main():
                     btts_no=gp["btts_no"],
                     expected_goals_home=round(lam_final, 3),
                     expected_goals_away=round(mu_final, 3),
+                    prev_prob_home=prev[0] if prev else None,
+                    prev_prob_draw=prev[1] if prev else None,
+                    prev_prob_away=prev[2] if prev else None,
+                    prev_computed_at=prev[3] if prev else None,
                 )
                 db.add(row)
                 saved_predictions[fx.id] = row

@@ -30,6 +30,11 @@ class FixturePrediction(Base):
     expected_goals_home = Column(Float, nullable=True)
     expected_goals_away = Column(Float, nullable=True)
     computed_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    # Previous run's probabilities — populated by predict.py before DELETE/INSERT cycle
+    prev_prob_home = Column(Float, nullable=True)
+    prev_prob_draw = Column(Float, nullable=True)
+    prev_prob_away = Column(Float, nullable=True)
+    prev_computed_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class ResolvedFixturePrediction(Base):
