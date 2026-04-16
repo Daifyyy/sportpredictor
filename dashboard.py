@@ -1063,28 +1063,17 @@ with tab_pred:
 
         # ── Rychlé sledování ────────────────────────────────────────────────
         st.subheader("📌 Rychlé sledování")
-        _QUICK_BTNS_ROW1 = [("H", "H"), ("D", "D"), ("A", "A")]
-        _QUICK_BTNS_ROW2 = [
+        _QUICK_BTNS = [
+            ("H", "H"), ("D", "D"), ("A", "A"),
             ("O2.5", "Over2.5"), ("U2.5", "Under2.5"),
             ("G1-3", "Goals1-3"), ("G2-4", "Goals2-4"),
-            ("BTTS+", "BTTS_Yes"), ("BTTS-", "BTTS_No"),
+            ("B+", "BTTS_Yes"), ("B-", "BTTS_No"),
         ]
         for fx in fixtures:
             st.caption(f"{fx['home_team']} vs {fx['away_team']}")
-            _r1 = st.columns(3)
-            for _qi, (_qlabel, _qtype) in enumerate(_QUICK_BTNS_ROW1):
-                with _r1[_qi]:
-                    if st.button(_qlabel, key=f"qs_{_qtype}_{fx['fixture_id']}", use_container_width=True):
-                        _qresult = save_tracking(fx, league, _qtype, None)
-                        if _qresult == "ok":
-                            st.toast(f"✅ {_qlabel} · {fx['home_team']} vs {fx['away_team']}", icon="📌")
-                        elif _qresult == "duplicate":
-                            st.toast("⚠️ Již sledováno.", icon="⚠️")
-                        else:
-                            st.toast("❌ Chyba při ukládání.", icon="❌")
-            _r2 = st.columns(6)
-            for _qi, (_qlabel, _qtype) in enumerate(_QUICK_BTNS_ROW2):
-                with _r2[_qi]:
+            _cols = st.columns(9)
+            for _qi, (_qlabel, _qtype) in enumerate(_QUICK_BTNS):
+                with _cols[_qi]:
                     if st.button(_qlabel, key=f"qs_{_qtype}_{fx['fixture_id']}", use_container_width=True):
                         _qresult = save_tracking(fx, league, _qtype, None)
                         if _qresult == "ok":
@@ -1568,7 +1557,7 @@ with tab_standings:
 .sth-rank{{width:24px;color:#888}}
 .sth-logo{{width:28px;padding:3px 5px}}
 .sth-name{{text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis}}
-.sth-pts{{font-weight:700;color:#e2e8f0}}
+.sth-pts{{font-weight:700;color:inherit}}
 @media(max-width:768px){{
   .sth-name{{display:none}}
   .sth-extra{{display:none}}
