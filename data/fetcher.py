@@ -116,15 +116,16 @@ class FootballFetcher:
 
     def get_fixture_injuries(
         self, fixture: Fixture, league_id: int, season: int
-    ) -> Tuple[List[PlayerInjury], List[PlayerInjury], int, int]:
+    ) -> Tuple[List[PlayerInjury], List[PlayerInjury], int, int, int, int]:
         """Fetch injuries for an upcoming fixture, enriched with player season stats.
 
-        Returns (home_injuries, away_injuries, home_team_goals, away_team_goals).
-        home/away_team_goals are team season totals used for normalization in InjuryAdjuster.
+        Returns (home_injuries, away_injuries, home_goals_for, away_goals_for,
+                 home_goals_against, away_goals_against).
+        goals_for/against are team season totals used for normalization in InjuryAdjuster.
         """
         data = self.client.get("injuries", {"fixture": fixture.id}, ttl=self.ttl.injuries)
         if not data or not data.get("response"):
-            return [], [], 50, 50
+            return [], [], 50, 50, 50, 50
 
         # Group raw entries by team_id, dedup by player_id
         raw_by_team: Dict[int, Dict[int, dict]] = {}
@@ -160,9 +161,9 @@ class FootballFetcher:
 
         home_injuries = enrich(fixture.home_team.id)
         away_injuries = enrich(fixture.away_team.id)
-        home_goals = self._get_team_season_goals(fixture.home_team.id, league_id, season)
-        away_goals = self._get_team_season_goals(fixture.away_team.id, league_id, season)
-        return home_injuries, away_injuries, home_goals, away_goals
+        home_gf, home_ga = self._get_team_season_stats(fixture.home_team.id, league_id, season)
+        away_gf, away_ga = self._get_team_season_stats(fixture.away_team.id, league_id, season)
+        return home_injuries, away_injuries, home_gf, away_gf, home_ga, away_ga
 
     def _get_player_season_stats(self, player_id: int, league_id: int, season: int) -> dict:
         """Returns {position, goals, assists, minutes}. TTL=24h (updates after each matchday)."""
@@ -187,16 +188,18 @@ class FootballFetcher:
             "assists":  goals.get("assists") or 0,
         }
 
-    def _get_team_season_goals(self, team_id: int, league_id: int, season: int) -> int:
-        """Returns total goals scored by team in season. Fallback=50. TTL=6h."""
+    def _get_team_season_stats(self, team_id: int, league_id: int, season: int) -> Tuple[int, int]:
+        """Returns (goals_for, goals_against) for team in season. Fallback=(50, 50). TTL=6h."""
         data = self.client.get(
             "teams/statistics", {"team": team_id, "league": league_id, "season": season}, ttl=self.ttl.team_stats
         )
         if not data:
-            return 50
+            return 50, 50
         response = data.get("response", {})
-        total = response.get("goals", {}).get("for", {}).get("total", {}).get("total")
-        return int(total) if total else 50
+        goals = response.get("goals", {})
+        gf = goals.get("for", {}).get("total", {}).get("total")
+        ga = goals.get("against", {}).get("total", {}).get("total")
+        return (int(gf) if gf else 50), (int(ga) if ga else 50)
 
     def get_fixture_lineups(
         self, fixture: Fixture

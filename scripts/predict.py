@@ -451,13 +451,14 @@ def main():
                 pred = model.predict(fx)
 
                 # Injury adjustment: fetch injuries, adjust λ/μ, recompute probabilities
-                home_inj, away_inj, home_goals, away_goals = fetcher.get_fixture_injuries(
-                    fx, cfg.id, cfg.season
+                home_inj, away_inj, home_goals, away_goals, home_goals_against, away_goals_against = (
+                    fetcher.get_fixture_injuries(fx, cfg.id, cfg.season)
                 )
                 if home_inj or away_inj:
                     lam_orig, mu_orig = pred.expected_goals_home, pred.expected_goals_away
                     lam_adj, mu_adj = injury_adjuster.adjust(
-                        lam_orig, mu_orig, home_inj, away_inj, home_goals, away_goals
+                        lam_orig, mu_orig, home_inj, away_inj, home_goals, away_goals,
+                        home_goals_against, away_goals_against
                     )
                     pred = predict_from_lam_mu(fx.id, lam_adj, mu_adj, model.dc_all.rho)
                     inj_names = (

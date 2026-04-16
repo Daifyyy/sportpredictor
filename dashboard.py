@@ -135,17 +135,19 @@ def get_league_injuries(league_key: str) -> dict:
     result = {}
     for fx in upcoming:
         try:
-            home_inj, away_inj, home_goals, away_goals = fetcher.get_fixture_injuries(
-                fx, cfg.id, cfg.season
+            home_inj, away_inj, home_goals, away_goals, home_goals_against, away_goals_against = (
+                fetcher.get_fixture_injuries(fx, cfg.id, cfg.season)
             )
         except Exception:
-            home_inj, away_inj, home_goals, away_goals = [], [], 50, 50
+            home_inj, away_inj, home_goals, away_goals, home_goals_against, away_goals_against = [], [], 50, 50, 50, 50
         # Deduplicate by player_id (API-Football may return the same player multiple times)
         result[fx.id] = {
             "home": list({i.player_id: asdict(i) for i in home_inj}.values()),
             "away": list({i.player_id: asdict(i) for i in away_inj}.values()),
             "home_goals": home_goals,
             "away_goals": away_goals,
+            "home_goals_against": home_goals_against,
+            "away_goals_against": away_goals_against,
         }
     return result
 
@@ -447,6 +449,7 @@ def render_injuries(
     home_name: str, away_name: str,
     home_injuries: list, away_injuries: list,
     home_goals: int, away_goals: int,
+    home_goals_against: int = 50, away_goals_against: int = 50,
 ) -> None:
     """Render injured/suspended player lists with per-player impact estimate."""
     if not home_injuries and not away_injuries:
@@ -454,11 +457,11 @@ def render_injuries(
 
     st.caption("🚑 Zranění a absence")
 
-    def fmt_player(inj: dict, team_goals: int) -> str:
+    def fmt_player(inj: dict, team_goals: int, team_goals_against: int) -> str:
         from data.models import PlayerInjury
         icon = _STATUS_ICON.get(inj["status"], "🔴")
         pos  = _POS_CZ.get(inj["position"], inj["position"])
-        atk, dfn = _injury_adjuster.player_impact(PlayerInjury(**inj), team_goals)
+        atk, dfn = _injury_adjuster.player_impact(PlayerInjury(**inj), team_goals, team_goals_against)
         impact = atk or dfn
 
         if inj["position"] in ("Attacker", "Midfielder"):
@@ -475,14 +478,14 @@ def render_injuries(
         st.markdown(f"**🏠 {home_name}**")
         if home_injuries:
             for inj in home_injuries:
-                st.markdown(fmt_player(inj, home_goals))
+                st.markdown(fmt_player(inj, home_goals, home_goals_against))
         else:
             st.caption("Žádná hlášená zranění")
     with col_a:
         st.markdown(f"**✈️ {away_name}**")
         if away_injuries:
             for inj in away_injuries:
-                st.markdown(fmt_player(inj, away_goals))
+                st.markdown(fmt_player(inj, away_goals, away_goals_against))
         else:
             st.caption("Žádná hlášená zranění")
 
@@ -1160,6 +1163,8 @@ with tab_pred:
                     inj_data.get("away", []),
                     inj_data.get("home_goals", 50),
                     inj_data.get("away_goals", 50),
+                    inj_data.get("home_goals_against", 50),
+                    inj_data.get("away_goals_against", 50),
                 )
 
                 render_lineups(
