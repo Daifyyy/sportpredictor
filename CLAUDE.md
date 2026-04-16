@@ -37,7 +37,7 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - `models/base.py` — `BasePredictor` ABC with `train(fixtures)`, `predict(fixture, history)`, `name`. All models must implement this.
 - `models/poisson.py` — `DixonColesPredictor`: MLE-trained Poisson model with DC correction (rho=-0.13) for low-score results. `train()` accepts `attack_prior`/`defence_prior` for Varianta C (cup leagues).
 - `models/calibrator.py` — `ProbabilityCalibrator`: isotonic regression per H/D/A; `GoalCalibrator`: isotonic regression na λ+μ → skutečné celkové góly (opravuje Poissonův bias nezávislosti). Oba fittovány v jednom walk-forward průchodu (`build_calibrators()`), NaN filtered.
-- `models/injury.py` — `InjuryAdjuster`: adjusts λ/μ for injuries. Uses `TYPE_CHECKING` guard for `PlayerInjury` import.
+- `models/injury.py` — `InjuryAdjuster`: adjusts λ/μ for injuries. Uses `TYPE_CHECKING` guard for `PlayerInjury` import. Per-90 attack contribution, dynamic midfielder G+A weight, defense quality factor.
 - `betting/value.py` — `ValueBetDetector`: compares model probabilities to Bet365 implied odds. Edge threshold: 3%.
 - `backtesting/engine.py` — `BacktestEngine`: walk-forward simulation with periodic retrain. Reports accuracy, Brier score, log loss, and calibration.
 
@@ -110,7 +110,7 @@ Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, 
 - `get_upcoming_fixtures(league, next_n)` — primary: `next` param; fallback: `status=NS` for cups
 - `get_fixture_statistics(fixture_id)` — `{team_id: FixtureStats}`, TTL=-1
 - `enrich_with_statistics(fixtures, max_per_team)` — in-place, last N per team
-- `get_fixture_injuries(fixture, league_id, season)` — `(home_inj, away_inj, home_goals, away_goals)`
+- `get_fixture_injuries(fixture, league_id, season)` — `(home_inj, away_inj, home_gf, away_gf, home_ga, away_ga)` — 6 hodnot; goals_against z `_get_team_season_stats()`
 - `get_fixture_lineups(fixture)` — `(home_lineup, away_lineup)` as `Optional[FixtureLineup]`; TTL=30min (announced ~1h before kickoff, empty before that)
 - `get_standings(league)` — list of standings groups, TTL=24h (1 group for domestic, N for cup phases)
 - `get_odds(fixture_id)` — all bookmakers, TTL=15min
@@ -133,9 +133,25 @@ Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, 
 - `expected_goals_home/away` v DB = goal-kalibrované λ/μ (po `GoalCalibrator.transform()`), ne raw ensemble výstup
 - `ensemble.py` `goal_probs` používá long-form klíče (`over2_5`, `goals1_3`, `btts_yes`, …) shodné s DB sloupci — `predict_from_lam_mu()` také. Žádná konverzní vrstva není potřeba.
 - GitHub Actions cache key: `predictor-cache-{os}-{run_id}`, restore prefix `predictor-cache-{os}-`. Cachuje `cache/football.db` + `models/saved/` (DC modely + kalibrátory).
-- `get_fixture_injuries()`: API-Football může vrátit stejného hráče vícekrát → `raw_by_team` je `Dict[int, Dict[int, dict]]` (klíč = player_id), deduplikace zabraňuje duplicitám v UI
+- `get_fixture_injuries()`: vrací 6 hodnot `(home_inj, away_inj, home_gf, away_gf, home_ga, away_ga)`; API-Football může vrátit stejného hráče vícekrát → `raw_by_team` je `Dict[int, Dict[int, dict]]` (klíč = player_id), deduplikace zabraňuje duplicitám v UI. `_get_team_season_stats()` vrací `(goals_for, goals_against)` z jednoho `teams/statistics` volání.
 - `get_fixture_lineups()`: vrací `(Optional[FixtureLineup], Optional[FixtureLineup])`; před ohlášením (~1h pre-match) vrací `(None, None)` — dashboard to tiše přeskočí; `FixtureLineup` se serializuje přes `dataclasses.asdict()` pro `@st.cache_data` pickle kompatibilitu
 - `render_prediction_stats()`: zobrazuje historické průměry jako predikci průběhu (xG=λ/μ, góly, forma, útočná síla, Elo, PPG); stats features (shots/corners) zobrazí se pouze pokud byly obohaceny přes `enrich_with_statistics` (tj. v praxi nedostupné pro nadcházející zápasy na dashboardu)
+
+## InjuryAdjuster (models/injury.py)
+
+`InjuryAdjuster.adjust(lam, mu, home_inj, away_inj, home_gf, away_gf, home_ga, away_ga)` — vrací upravené `(λ, μ)`. Predikce v DB jsou **již po této úpravě** (není třeba počítat ručně).
+
+**Attack impact** (→ snižuje λ/μ útočícího týmu):
+- Pokud hráč odehrál ≥450 min: `g_per_90 / team_g_per_game` (per-90 rate; team_g_per_game = goals_for/38)
+- Pokud <450 min (super-sub): fallback na `(goals + 0.7*assists) / team_goals_for`
+- Záložník: násobí výsledek dynamickou vahou dle G+A: ≥12→70%, ≥6→50%, ≥2→30%, jinak→15%
+
+**Defense impact** (→ zvyšuje λ/μ soupeře):
+- Obránce: `(minutes/3420) * 0.15 * defense_quality`
+- Brankář: `(minutes/3420) * 0.20 * defense_quality`
+- `defense_quality = clamp(1.3 / (goals_against/38), 0.5, 2.0)` — elite obrany (málo GA) mají vyšší koeficient
+
+**Caps**: MAX_ATTACK_REDUCTION=0.25, MAX_DEFENSE_INCREASE=0.20. Pochybný hráč: faktor 0.35.
 
 ## Bookmaker IDs (API Football)
 
