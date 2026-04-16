@@ -32,7 +32,7 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - `api/cache.py` — `CacheManager`: SQLite TTL cache. TTL=-1 means never expires (used for finished match history).
 - `api/client.py` — `APIClient`: wraps `requests.Session` with token-bucket `RateLimiter` (300 req/min) and auto-caching. Pass `force_refresh=True` to bypass cache.
 - `data/fetcher.py` — `FootballFetcher`: orchestrates API calls. Returns typed dataclasses.
-- `data/models.py` — Core dataclasses: `Team`, `Fixture`, `MatchResult`, `Odds`, `Prediction`, `PlayerInjury`, `FixtureStats`.
+- `data/models.py` — Core dataclasses: `Team`, `Fixture`, `MatchResult`, `Odds`, `Prediction`, `PlayerInjury`, `FixtureStats`, `LineupPlayer`, `FixtureLineup`.
 - `features/engineer.py` — `FeatureEngineer`: produces feature dicts (form, H2H, Elo, venue, streak, rest days, xG stats). `precompute()` builds indexes in O(n); `build_features()` is leakage-free per fixture.
 - `models/base.py` — `BasePredictor` ABC with `train(fixtures)`, `predict(fixture, history)`, `name`. All models must implement this.
 - `models/poisson.py` — `DixonColesPredictor`: MLE-trained Poisson model with DC correction (rho=-0.13) for low-score results. `train()` accepts `attack_prior`/`defence_prior` for Varianta C (cup leagues).
@@ -69,12 +69,12 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 ## Dashboard tabs (5)
 
 1. **Predikce** — HTML tabulka (responsivní: PC = logo+název, mobil = jen logo); sloupce H% D% A% O2.5 U2.5 G1-3 G2-4 BTTS_Y BTTS_N; zelená ≥65%. Pod tabulkou dvě sekce:
-   - **📌 Rychlé sledování** — pro každý zápas název zápasu + 2 řady tlačítek (`use_container_width=True`): řada 1: H D A (3 sloupce), řada 2: O2.5 U2.5 G1-3 G2-4 BTTS+ BTTS- (6 sloupců). Jeden klik = okamžité přidání, `st.toast()` potvrzení. Mobilně bezpečné (řada 1: ~125px/btn, řada 2: ~62px/btn).
-   - **Detailní analýza** — expandery s detailní analýzou + zranění + tracking. Tracking používá `st.form` (selectbox + `st.form_submit_button`) — selectbox nehlásí rerun, expander zůstane otevřený při změně výběru, rerun nastane až po kliknutí Sledovat.
+   - **📌 Rychlé sledování** — pro každý zápas: caption s názvem zápasu + 1 řada 9 tlačítek (`st.columns(9)`, `use_container_width=True`): H D A O2.5 U2.5 G1-3 G2-4 B+ B-. Jeden klik = okamžité přidání, `st.toast()` potvrzení.
+   - **Detailní analýza** — expandery. Pořadí sekcí v každém expanderu: (1) `render_prediction_stats` — dual-bar chart předpovídaného průběhu, (2) `render_match_detail` — xG metriky + forma + H2H tabulky, (3) `render_bet_validation` — signály Goals1-3 / Výhra domácích, (4) `render_injuries` — zranění, (5) `render_lineups` — sestavy, (6) tracking form. Expander label: `🚑` pokud zranění, `⚽` pokud dostupné sestavy. Tracking používá `st.form` (selectbox + `st.form_submit_button`) — selectbox nehlásí rerun, expander zůstane otevřený při změně výběru, rerun nastane až po kliknutí Sledovat.
 2. **Sledované** — filtr liga/stav; `tracked_prob` (přidáno) vs `model_prob` (aktuální) + delta s 🟢🟡🔴; resolve button. Vývoj pravděpodobnosti (sloupec Vývoj) se zobrazuje i u vyřešených predikcí — podmínka `r.correct is None` byla odstraněna (dashboard.py:1028).
 3. **Výsledky** — archiv resolved_fixture_predictions, accuracy modelu
 4. **Statistiky** — accuracy by type/league + reliability diagram
-5. **Tabulka** — `/standings` endpoint; přepínač Celková/Doma/Venku; responsivní HTML tabulka s logem každého týmu; desktop: # | logo | název | Z V R P | GF GA | +/- | Forma | Body; mobil: skryje název, GF, GA, Forma; Forma barevná (W=zelená, D=šedá, L=červená); TTL=24h
+5. **Tabulka** — `/standings` endpoint; přepínač Celková/Doma/Venku; responsivní HTML tabulka s logem každého týmu; desktop: # | logo | název | Z V R P | GF GA | +/- | Forma | Body; mobil: skryje název, GF, GA, Forma; Forma barevná (W=zelená, D=šedá, L=červená); TTL=24h. `.sth-pts` má `color:inherit` (viditelné v light i dark mode)
 
 ## Validace sázky (render_bet_validation)
 
@@ -111,6 +111,7 @@ Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, 
 - `get_fixture_statistics(fixture_id)` — `{team_id: FixtureStats}`, TTL=-1
 - `enrich_with_statistics(fixtures, max_per_team)` — in-place, last N per team
 - `get_fixture_injuries(fixture, league_id, season)` — `(home_inj, away_inj, home_goals, away_goals)`
+- `get_fixture_lineups(fixture)` — `(home_lineup, away_lineup)` as `Optional[FixtureLineup]`; TTL=30min (announced ~1h before kickoff, empty before that)
 - `get_standings(league)` — list of standings groups, TTL=24h (1 group for domestic, N for cup phases)
 - `get_odds(fixture_id)` — all bookmakers, TTL=15min
 
@@ -133,6 +134,8 @@ Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, 
 - `ensemble.py` `goal_probs` používá long-form klíče (`over2_5`, `goals1_3`, `btts_yes`, …) shodné s DB sloupci — `predict_from_lam_mu()` také. Žádná konverzní vrstva není potřeba.
 - GitHub Actions cache key: `predictor-cache-{os}-{run_id}`, restore prefix `predictor-cache-{os}-`. Cachuje `cache/football.db` + `models/saved/` (DC modely + kalibrátory).
 - `get_fixture_injuries()`: API-Football může vrátit stejného hráče vícekrát → `raw_by_team` je `Dict[int, Dict[int, dict]]` (klíč = player_id), deduplikace zabraňuje duplicitám v UI
+- `get_fixture_lineups()`: vrací `(Optional[FixtureLineup], Optional[FixtureLineup])`; před ohlášením (~1h pre-match) vrací `(None, None)` — dashboard to tiše přeskočí; `FixtureLineup` se serializuje přes `dataclasses.asdict()` pro `@st.cache_data` pickle kompatibilitu
+- `render_prediction_stats()`: zobrazuje historické průměry jako predikci průběhu (xG=λ/μ, góly, forma, útočná síla, Elo, PPG); stats features (shots/corners) zobrazí se pouze pokud byly obohaceny přes `enrich_with_statistics` (tj. v praxi nedostupné pro nadcházející zápasy na dashboardu)
 
 ## Bookmaker IDs (API Football)
 
