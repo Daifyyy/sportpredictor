@@ -25,7 +25,13 @@ from models.injury import InjuryAdjuster
 from models.poisson import DixonColesPredictor
 
 MODELS_DIR = Path("models/saved")
-PREDICTION_TYPES = ["H", "D", "A", "Under2.5", "Over2.5", "Goals1-3", "Goals2-4", "BTTS_Yes", "BTTS_No"]
+PREDICTION_TYPES = [
+    "H", "D", "A", "Under2.5", "Over2.5", "Goals1-3", "Goals2-4", "BTTS_Yes", "BTTS_No",
+    "Corners_Over8.5", "Corners_Under8.5",
+    "Corners_Over9.5", "Corners_Under9.5",
+    "Corners_Over10.5", "Corners_Under10.5",
+    "Corners_Over11.5", "Corners_Under11.5",
+]
 _injury_adjuster = InjuryAdjuster()
 
 flags = {"England": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Spain": "🇪🇸", "Germany": "🇩🇪", "Italy": "🇮🇹", "France": "🇫🇷", "Czech Republic": "🇨🇿", "Europe": "🇪🇺"}
@@ -490,6 +496,40 @@ def render_injuries(
             st.caption("Žádná hlášená zranění")
 
 
+def render_referee(feats: dict) -> None:
+    """Display referee historical goal stats as a neutral info badge."""
+    name = feats.get("referee_name")
+    if not name:
+        return
+    n = feats.get("referee_n_games", 0)
+    avg_goals = feats.get("referee_avg_goals")
+    factor = feats.get("referee_goal_factor", 1.0)
+
+    if avg_goals is None or n < 5:
+        st.caption(f"🧑‍⚖️ Rozhodčí: **{name}** &nbsp;·&nbsp; nedostatek dat ({n} zápasů)")
+        return
+
+    pct = (factor - 1.0) * 100
+    if pct > 7:
+        badge = "🔴 výrazně více gólů"
+    elif pct > 3:
+        badge = "🟡 mírně více gólů"
+    elif pct < -7:
+        badge = "🔵 výrazně méně gólů"
+    elif pct < -3:
+        badge = "🟡 mírně méně gólů"
+    else:
+        badge = "🟢 průměrný"
+
+    sign = "+" if pct >= 0 else ""
+    st.caption(
+        f"🧑‍⚖️ Rozhodčí: **{name}** &nbsp;·&nbsp; "
+        f"avg {avg_goals:.1f} gólů/zápas &nbsp;·&nbsp; "
+        f"{n} zápasů v historii &nbsp;·&nbsp; "
+        f"{sign}{pct:.0f}% vs průměr ligy &nbsp;·&nbsp; {badge}"
+    )
+
+
 _POS_ORDER = {"G": 0, "D": 1, "M": 2, "F": 3}
 _POS_LABEL = {"G": "Brankář", "D": "Obránci", "M": "Záložníci", "F": "Útočníci"}
 
@@ -838,6 +878,14 @@ def save_tracking(fixture: dict, league: str, prediction_type: str, model_prob: 
         "Goals2-4": fixture.get("goals2_4"),
         "BTTS_Yes": fixture.get("btts_yes"),
         "BTTS_No": fixture.get("btts_no"),
+        "Corners_Over8.5":   fixture.get("corners_over8_5"),
+        "Corners_Under8.5":  fixture.get("corners_under8_5"),
+        "Corners_Over9.5":   fixture.get("corners_over9_5"),
+        "Corners_Under9.5":  fixture.get("corners_under9_5"),
+        "Corners_Over10.5":  fixture.get("corners_over10_5"),
+        "Corners_Under10.5": fixture.get("corners_under10_5"),
+        "Corners_Over11.5":  fixture.get("corners_over11_5"),
+        "Corners_Under11.5": fixture.get("corners_under11_5"),
     }
     with get_db() as db:
         existing = db.query(TrackedPrediction).filter(
@@ -976,7 +1024,7 @@ with st.sidebar:
             st.caption(f"Platnost: {end_date}  ·  Obnoveno před < 5 min")
 
 
-tab_pred, tab_tracked, tab_results, tab_stats, tab_standings = st.tabs(["📅 Predikce", "📋 Sledované", "🔍 Výsledky", "📊 Statistiky", "🏆 Tabulka"])
+tab_pred, tab_tracked, tab_results, tab_stats, tab_corners, tab_standings = st.tabs(["📅 Predikce", "📋 Sledované", "🔍 Výsledky", "📊 Statistiky", "🔄 Rohy", "🏆 Tabulka"])
 
 
 # ── TAB 1: Predikce ────────────────────────────────────────────────────────────
@@ -1028,6 +1076,16 @@ with tab_pred:
                 "btts_no": r.btts_no,
                 "expected_goals_home": getattr(r, "expected_goals_home", None),
                 "expected_goals_away": getattr(r, "expected_goals_away", None),
+                "expected_corners_home": getattr(r, "expected_corners_home", None),
+                "expected_corners_away": getattr(r, "expected_corners_away", None),
+                "corners_over8_5":   getattr(r, "corners_over8_5", None),
+                "corners_under8_5":  getattr(r, "corners_under8_5", None),
+                "corners_over9_5":   getattr(r, "corners_over9_5", None),
+                "corners_under9_5":  getattr(r, "corners_under9_5", None),
+                "corners_over10_5":  getattr(r, "corners_over10_5", None),
+                "corners_under10_5": getattr(r, "corners_under10_5", None),
+                "corners_over11_5":  getattr(r, "corners_over11_5", None),
+                "corners_under11_5": getattr(r, "corners_under11_5", None),
                 "league": league,
             } for r in rows]
             st.session_state["upcoming_data"] = data
@@ -1156,6 +1214,7 @@ with tab_pred:
                 render_prediction_stats(fx, feats)
                 render_match_detail(fx, feats, league_avg)
                 render_bet_validation(fx, feats)
+                render_referee(feats)
 
                 render_injuries(
                     home, away,
@@ -1468,128 +1527,387 @@ with tab_stats:
     st.subheader("Statistiky")
 
     with get_db() as db:
-        all_rows = db.query(TrackedPrediction).filter(
+        all_tracked = db.query(TrackedPrediction).filter(
             TrackedPrediction.correct.isnot(None)
         ).all()
+        cal_rows = db.query(ResolvedFixturePrediction).all()
 
-    if not all_rows:
+    _CORNERS_TYPES = {t for t in PREDICTION_TYPES if t.startswith("Corners_")}
+    goals_rows   = [r for r in all_tracked if r.prediction_type not in _CORNERS_TYPES]
+    corners_rows = [r for r in all_tracked if r.prediction_type in _CORNERS_TYPES]
+
+    # ── Celkový přehled ───────────────────────────────────────────────────────
+    st.markdown("### Celkový přehled")
+
+    def _pct(rows):
+        if not rows:
+            return 0.0, 0, 0
+        c = sum(1 for r in rows if r.correct)
+        return c / len(rows) * 100, c, len(rows)
+
+    g_pct, g_ok, g_tot   = _pct(goals_rows)
+    c_pct, c_ok, c_tot   = _pct(corners_rows)
+    a_pct, a_ok, a_tot   = _pct(all_tracked)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Celková úspěšnost",           f"{a_pct:.1f}%", f"{a_ok}/{a_tot}")
+    m2.metric("Model výsledků & gólů",       f"{g_pct:.1f}%", f"{g_ok}/{g_tot}")
+    m3.metric("Model rohů",                  f"{c_pct:.1f}%", f"{c_ok}/{c_tot}" if c_tot else "žádná data")
+
+    if all_tracked:
+        # Avg tracked_prob for correct vs incorrect (confidence when right/wrong)
+        correct_probs   = [r.tracked_prob for r in all_tracked if r.correct     and r.tracked_prob is not None]
+        incorrect_probs = [r.tracked_prob for r in all_tracked if not r.correct and r.tracked_prob is not None]
+        if correct_probs and incorrect_probs:
+            p1, p2 = st.columns(2)
+            p1.metric("Průměrná P(správné tipy)",   f"{sum(correct_probs)/len(correct_probs):.1%}")
+            p2.metric("Průměrná P(špatné tipy)",    f"{sum(incorrect_probs)/len(incorrect_probs):.1%}")
+
+    if not all_tracked:
         st.info("Žádné vyřešené predikce pro statistiky.")
-    else:
-        total = len(all_rows)
-        total_correct = sum(1 for r in all_rows if r.correct)
-        overall_pct = total_correct / total * 100 if total else 0
+        st.stop()
 
-        st.metric("Celková úspěšnost", f"{overall_pct:.1f}%", f"{total_correct}/{total} správně")
-        st.divider()
+    # ── Helper: reliability diagram sekce ────────────────────────────────────
+    from scipy.stats import beta as beta_dist
 
-        by_type: dict[str, dict] = {}
+    def _reliability_section(markets, resolved, n_bins=5):
+        """Render reliability line charts + tables for a list of markets.
+
+        markets: list of (attr, actual_fn, label)
+        resolved: list of ResolvedFixturePrediction rows
+        """
+        edges = [i / n_bins for i in range(n_bins + 1)]
+        for attr, actual_fn, label in markets:
+            probs  = [getattr(r, attr, None) for r in resolved]
+            valid  = [(p, actual_fn(r)) for p, r in zip(probs, resolved) if p is not None]
+            if not valid:
+                st.caption(f"**{label}** — žádná data")
+                continue
+            ps, ls = zip(*valid)
+
+            rows_r = []
+            for i in range(n_bins):
+                lo, hi = edges[i], edges[i + 1]
+                idxs = [j for j, p in enumerate(ps) if lo <= p < hi]
+                n = len(idxs)
+                if n < 5:
+                    continue
+                k = sum(ls[j] for j in idxs)
+                mean_pred   = sum(ps[j] for j in idxs) / n
+                actual_freq = k / n
+                ci_lo, ci_hi = beta_dist.interval(0.90, k + 0.5, n - k + 0.5)
+                rows_r.append({
+                    "Predicted %": round(mean_pred * 100, 1),
+                    "Model":       round(actual_freq * 100, 1),
+                    "CI low":      round(ci_lo * 100, 1),
+                    "CI high":     round(ci_hi * 100, 1),
+                    "N":           n,
+                })
+
+            n_total = sum(r["N"] for r in rows_r)
+            st.caption(f"**{label}** ({n_total} zápasů v binech)")
+            if not rows_r:
+                st.caption("Nedostatek dat v binech.")
+                continue
+            df_r = pd.DataFrame(rows_r).set_index("Predicted %").sort_index()
+            chart = df_r[["Model"]].copy()
+            chart["Ideál"] = chart.index
+            st.line_chart(chart, use_container_width=True)
+            tbl = df_r[["Model", "CI low", "CI high", "N"]].copy()
+            tbl.index = [f"{x}%" for x in tbl.index]
+            tbl.columns = ["Actual %", "CI 90% low", "CI 90% high", "N"]
+            st.dataframe(tbl, use_container_width=True)
+
+    # ── Helper: typ/liga breakdown ────────────────────────────────────────────
+    def _breakdown_section(rows, label_fn=None):
+        by_type: dict[str, dict]   = {}
         by_league: dict[str, dict] = {}
-
-        for r in all_rows:
+        for r in rows:
             for key, bucket in [(r.prediction_type, by_type), (r.league, by_league)]:
                 if key not in bucket:
                     bucket[key] = {"count": 0, "correct": 0}
-                bucket[key]["count"] += 1
+                bucket[key]["count"]   += 1
                 if r.correct:
                     bucket[key]["correct"] += 1
 
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("Podle typu predikce")
-            type_rows = [
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Podle typu predikce**")
+            type_data = [
                 {
-                    "Typ": k,
-                    "Počet": v["count"],
-                    "Správně": v["correct"],
-                    "Úspěšnost %": round(v["correct"] / v["count"] * 100, 1),
+                    "Typ":          label_fn(k) if label_fn else k,
+                    "Počet":        v["count"],
+                    "Správně":      v["correct"],
+                    "Úspěšnost %":  round(v["correct"] / v["count"] * 100, 1),
                 }
                 for k, v in by_type.items()
             ]
-            df_type = pd.DataFrame(type_rows).sort_values("Úspěšnost %", ascending=False)
-            st.dataframe(df_type, use_container_width=True, hide_index=True)
-            if not df_type.empty:
-                st.bar_chart(df_type.set_index("Typ")["Úspěšnost %"])
-
-        with col2:
-            st.subheader("Podle ligy")
-            league_rows = [
+            if type_data:
+                df_t = pd.DataFrame(type_data).sort_values("Úspěšnost %", ascending=False)
+                st.dataframe(df_t, use_container_width=True, hide_index=True)
+                st.bar_chart(df_t.set_index("Typ")["Úspěšnost %"])
+        with c2:
+            st.markdown("**Podle ligy**")
+            league_data = [
                 {
-                    "Liga": leagues_display.get(k, k),
-                    "Počet": v["count"],
-                    "Správně": v["correct"],
-                    "Úspěšnost %": round(v["correct"] / v["count"] * 100, 1),
+                    "Liga":         leagues_display.get(k, k),
+                    "Počet":        v["count"],
+                    "Správně":      v["correct"],
+                    "Úspěšnost %":  round(v["correct"] / v["count"] * 100, 1),
                 }
                 for k, v in by_league.items()
             ]
-            df_league = pd.DataFrame(league_rows).sort_values("Úspěšnost %", ascending=False)
-            st.dataframe(df_league, use_container_width=True, hide_index=True)
-            if not df_league.empty:
-                st.bar_chart(df_league.set_index("Liga")["Úspěšnost %"])
+            if league_data:
+                df_l = pd.DataFrame(league_data).sort_values("Úspěšnost %", ascending=False)
+                st.dataframe(df_l, use_container_width=True, hide_index=True)
+                st.bar_chart(df_l.set_index("Liga")["Úspěšnost %"])
 
-        # ── Reliability diagram from resolved_fixture_predictions ─────────────
-        st.divider()
-        st.subheader("Kalibrace modelu")
+    # ── MODEL VÝSLEDKŮ & GÓLŮ ─────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### ⚽ Model výsledků & gólů")
+
+    if not goals_rows:
+        st.info("Žádné vyřešené predikce výsledků/gólů.")
+    else:
+        _breakdown_section(goals_rows)
+
+        if len(cal_rows) >= 50:
+            st.markdown("#### Kalibrace — výsledky (H/D/A)")
+            st.caption(
+                "Reliability diagram: dobře zkalibrovaný model leží na diagonále. "
+                "Data z archivu resolved_fixture_predictions · 90% Clopper-Pearson CI."
+            )
+            _reliability_section(
+                [
+                    ("prob_home", lambda r: r.actual_outcome == "H", "Výhra domácích"),
+                    ("prob_draw", lambda r: r.actual_outcome == "D", "Remíza"),
+                    ("prob_away", lambda r: r.actual_outcome == "A", "Výhra hostů"),
+                ],
+                cal_rows,
+            )
+
+            st.markdown("#### Kalibrace — gólové markety")
+            st.caption("Ověřuje přesnost GoalCalibrátoru — body by měly ležet na diagonále.")
+            _reliability_section(
+                [
+                    ("over2_5",  lambda r: (r.home_score + r.away_score) > 2,   "Over 2.5"),
+                    ("under2_5", lambda r: (r.home_score + r.away_score) <= 2,  "Under 2.5"),
+                    ("goals1_3", lambda r: 1 <= (r.home_score + r.away_score) <= 3, "Goals 1-3"),
+                    ("goals2_4", lambda r: 2 <= (r.home_score + r.away_score) <= 4, "Goals 2-4"),
+                    ("btts_yes", lambda r: r.home_score > 0 and r.away_score > 0, "BTTS Ano"),
+                    ("btts_no",  lambda r: not (r.home_score > 0 and r.away_score > 0), "BTTS Ne"),
+                ],
+                cal_rows,
+            )
+        else:
+            st.info(f"Reliability diagram: potřeba ≥ 50 archivovaných zápasů (aktuálně {len(cal_rows)}).")
+
+    # ── MODEL ROHŮ ────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### 🔄 Model rohů")
+
+    if not corners_rows:
+        st.info("Žádné vyřešené predikce rohů. Sleduj rohy v záložce 🔄 Rohy.")
+    else:
+        def _corners_label(k):
+            return k.replace("Corners_", "").replace("Over", "O").replace("Under", "U")
+
+        _breakdown_section(corners_rows, label_fn=_corners_label)
+
+    # Reliability diagram pro corners — potřebuje actual_corners v archivu
+    cal_corners = [
+        r for r in cal_rows
+        if getattr(r, "actual_corners_home", None) is not None
+        and getattr(r, "actual_corners_away", None) is not None
+        and getattr(r, "corners_over9_5", None) is not None
+    ]
+
+    if len(cal_corners) >= 20:
+        st.markdown("#### Kalibrace — rohové markety")
         st.caption(
-            "Reliability diagram: pokud je model dobře zkalibrován, měly by body ležet na diagonále. "
-            "Data z posledních 60 dní (resolved_fixture_predictions). "
-            "Šedé pásmo = 90% Clopper-Pearson interval spolehlivosti; číslo v závorce = počet zápasů v binu."
+            "Reliability diagram pro Over/Under rohových trhů. "
+            "actual = skutečný počet rohů v zápase z archivu."
         )
 
-        with get_db() as db:
-            cal_rows = db.query(ResolvedFixturePrediction).all()
+        def _actual_corners(r):
+            return (r.actual_corners_home or 0) + (r.actual_corners_away or 0)
 
-        if len(cal_rows) < 50:
-            st.info(f"Nedostatek dat pro reliability diagram (potřeba ≥ 50 odehraných zápasů v archivu, aktuálně {len(cal_rows)}).")
-        else:
-            from scipy.stats import beta as beta_dist
-
-            n_bins = 5
-            edges = [i / n_bins for i in range(n_bins + 1)]
-
-            for outcome, prob_attr, outcome_label in [
-                ("H", "prob_home", "Výhra domácích"),
-                ("D", "prob_draw", "Remíza"),
-                ("A", "prob_away", "Výhra hostů"),
-            ]:
-                probs  = [getattr(r, prob_attr) for r in cal_rows]
-                labels = [1 if r.actual_outcome == outcome else 0 for r in cal_rows]
-
-                rows = []
-                for i in range(n_bins):
-                    lo, hi = edges[i], edges[i + 1]
-                    idxs = [j for j, p in enumerate(probs) if lo <= p < hi]
-                    n = len(idxs)
-                    if n < 5:
-                        continue
-                    k = sum(labels[j] for j in idxs)
-                    mean_pred = sum(probs[j] for j in idxs) / n
-                    actual_freq = k / n
-                    # Clopper-Pearson 90% CI
-                    ci_lo, ci_hi = beta_dist.interval(0.90, k + 0.5, n - k + 0.5)
-                    rows.append({
-                        "Predicted %": round(mean_pred * 100, 1),
-                        "Model": round(actual_freq * 100, 1),
-                        "CI low": round(ci_lo * 100, 1),
-                        "CI high": round(ci_hi * 100, 1),
-                        "N": n,
-                    })
-
-                st.caption(f"**{outcome_label}** (celkem {sum(r['N'] for r in rows)} zápasů v binech)")
-                if not rows:
-                    st.caption("Nedostatek dat v binech.")
-                    continue
-                df_out = pd.DataFrame(rows).set_index("Predicted %").sort_index()
-                chart_df = df_out[["Model"]].copy()
-                chart_df["Ideál"] = chart_df.index
-                st.line_chart(chart_df, use_container_width=True)
-                ci_display = df_out[["Model", "CI low", "CI high", "N"]].copy()
-                ci_display.index = [f"{x}%" for x in ci_display.index]
-                ci_display.columns = ["Actual %", "CI 90% low", "CI 90% high", "N"]
-                st.dataframe(ci_display, use_container_width=True)
+        _reliability_section(
+            [
+                ("corners_over8_5",   lambda r: _actual_corners(r) > 8,  "Over 8.5"),
+                ("corners_under8_5",  lambda r: _actual_corners(r) <= 8, "Under 8.5"),
+                ("corners_over9_5",   lambda r: _actual_corners(r) > 9,  "Over 9.5"),
+                ("corners_under9_5",  lambda r: _actual_corners(r) <= 9, "Under 9.5"),
+                ("corners_over10_5",  lambda r: _actual_corners(r) > 10, "Over 10.5"),
+                ("corners_under10_5", lambda r: _actual_corners(r) <= 10,"Under 10.5"),
+                ("corners_over11_5",  lambda r: _actual_corners(r) > 11, "Over 11.5"),
+                ("corners_under11_5", lambda r: _actual_corners(r) <= 11,"Under 11.5"),
+            ],
+            cal_corners,
+        )
+    else:
+        st.info(
+            f"Reliability diagram rohů: potřeba ≥ 20 archivovaných zápasů s corners daty "
+            f"(aktuálně {len(cal_corners)}). Data se nahromadí automaticky po dalších bězích GitHub Actions."
+        )
 
 
-# ── TAB 5: Tabulka ─────────────────────────────────────────────────────────────
+# ── TAB 5: Rohy ────────────────────────────────────────────────────────────────
+
+with tab_corners:
+    st.subheader("Rohové kopy")
+
+    cr_league = st.selectbox(
+        "Liga",
+        options=league_keys,
+        format_func=lambda k: leagues_display[k],
+        key="corners_league",
+    )
+
+    with get_db() as db:
+        cr_rows = (
+            db.query(FixturePrediction)
+            .filter(
+                FixturePrediction.league == cr_league,
+                FixturePrediction.corners_over8_5.isnot(None),
+            )
+            .order_by(FixturePrediction.match_date)
+            .all()
+        )
+
+    if not cr_rows:
+        st.info("Pro tuto ligu nejsou k dispozici predikce rohů. Rohy jsou dostupné pouze pro domácí ligy po obohacení historických dat.")
+    else:
+        def _c(val, threshold=0.65):
+            if val is None:
+                return "—"
+            pct = f"{val:.0%}"
+            if val >= threshold:
+                return f'<span style="color:#4ade80;font-weight:700">{pct}</span>'
+            return pct
+
+        thead_c = (
+            "<tr>"
+            "<th style='text-align:left'>Zápas</th>"
+            "<th>Datum</th>"
+            "<th>λ</th><th>μ</th><th>Σ</th>"
+            "<th>O8.5</th><th>U8.5</th>"
+            "<th>O9.5</th><th>U9.5</th>"
+            "<th>O10.5</th><th>U10.5</th>"
+            "<th>O11.5</th><th>U11.5</th>"
+            "</tr>"
+        )
+        rows_c = []
+        for r in cr_rows:
+            lh = getattr(r, "expected_corners_home", None)
+            la = getattr(r, "expected_corners_away", None)
+            total_c = round(lh + la, 1) if lh is not None and la is not None else None
+            dt = r.match_date.strftime("%d.%m %H:%M") if r.match_date else ""
+            rows_c.append(
+                f"<tr>"
+                f"<td style='text-align:left'>{r.home_team} – {r.away_team}</td>"
+                f"<td>{dt}</td>"
+                f"<td>{lh:.1f}</td><td>{la:.1f}</td>"
+                f"<td><b>{total_c}</b></td>"
+                f"<td>{_c(getattr(r,'corners_over8_5',None))}</td>"
+                f"<td>{_c(getattr(r,'corners_under8_5',None))}</td>"
+                f"<td>{_c(getattr(r,'corners_over9_5',None))}</td>"
+                f"<td>{_c(getattr(r,'corners_under9_5',None))}</td>"
+                f"<td>{_c(getattr(r,'corners_over10_5',None))}</td>"
+                f"<td>{_c(getattr(r,'corners_under10_5',None))}</td>"
+                f"<td>{_c(getattr(r,'corners_over11_5',None))}</td>"
+                f"<td>{_c(getattr(r,'corners_under11_5',None))}</td>"
+                f"</tr>"
+            )
+
+        st.markdown(f"""
+<style>
+.crt{{width:100%;border-collapse:collapse;font-size:13px}}
+.crt th,.crt td{{padding:5px 8px;text-align:center;border-bottom:1px solid #2a2a2a;white-space:nowrap}}
+.crt th{{color:#aaa;font-size:11px;font-weight:600;text-transform:uppercase}}
+@media(max-width:768px){{.crt{{font-size:11px}}.crt th,.crt td{{padding:4px 5px}}}}
+</style>
+<div style="overflow-x:auto">
+<table class="crt"><thead>{thead_c}</thead><tbody>{"".join(rows_c)}</tbody></table>
+</div>""", unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown("#### Rychlé sledování")
+        st.caption("Klikni pro sledování konkrétního rohu.")
+
+        _C_BTNS = [
+            ("C8+", "Corners_Over8.5"),  ("C8-", "Corners_Under8.5"),
+            ("C9+", "Corners_Over9.5"),  ("C9-", "Corners_Under9.5"),
+            ("C10+","Corners_Over10.5"), ("C10-","Corners_Under10.5"),
+            ("C11+","Corners_Over11.5"), ("C11-","Corners_Under11.5"),
+        ]
+
+        for r in cr_rows:
+            lh = getattr(r, "expected_corners_home", None)
+            la = getattr(r, "expected_corners_away", None)
+            total_c = round(lh + la, 1) if lh is not None and la is not None else "?"
+            st.caption(f"**{r.home_team} – {r.away_team}** | Σ={total_c} rohů")
+            # Build fixture dict compatible with save_tracking()
+            cr_fixture = {
+                "fixture_id": r.fixture_id,
+                "home_team": r.home_team,
+                "away_team": r.away_team,
+                "date": r.match_date.isoformat(),
+                "corners_over8_5":   getattr(r, "corners_over8_5", None),
+                "corners_under8_5":  getattr(r, "corners_under8_5", None),
+                "corners_over9_5":   getattr(r, "corners_over9_5", None),
+                "corners_under9_5":  getattr(r, "corners_under9_5", None),
+                "corners_over10_5":  getattr(r, "corners_over10_5", None),
+                "corners_under10_5": getattr(r, "corners_under10_5", None),
+                "corners_over11_5":  getattr(r, "corners_over11_5", None),
+                "corners_under11_5": getattr(r, "corners_under11_5", None),
+            }
+            btn_cols = st.columns(len(_C_BTNS))
+            for col, (label, ptype) in zip(btn_cols, _C_BTNS):
+                prob_field = ptype.lower().replace(".", "_")
+                prob_val = getattr(r, prob_field, None)
+                btn_label = f"{label} {prob_val:.0%}" if prob_val else label
+                if col.button(btn_label, key=f"cr_{r.fixture_id}_{ptype}", use_container_width=True):
+                    result = save_tracking(cr_fixture, r.league, ptype, prob_val)
+                    if result == "ok":
+                        st.toast(f"✅ {r.home_team} – {r.away_team}: {ptype} přidáno")
+                    elif result == "duplicate":
+                        st.toast("⚠️ Již sledováno.", icon="⚠️")
+                    else:
+                        st.toast("❌ Chyba při ukládání.", icon="❌")
+
+        st.markdown("---")
+        st.markdown("#### Detail zápasů")
+        for r in cr_rows:
+            lh = getattr(r, "expected_corners_home", None)
+            la = getattr(r, "expected_corners_away", None)
+            total_c = lh + la if lh is not None and la is not None else None
+            with st.expander(f"{r.home_team} – {r.away_team}"):
+                if total_c is not None:
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("λ domácí", f"{lh:.2f}")
+                    col2.metric("μ hosté", f"{la:.2f}")
+                    col3.metric("Celkem rohů (λ+μ)", f"{total_c:.2f}")
+
+                    # Simple bar chart comparing lambda / mu
+                    bar_data = {"Domácí": lh, "Hosté": la}
+                    st.bar_chart(bar_data)
+
+                markets = {
+                    "Over 8.5": getattr(r, "corners_over8_5", None),
+                    "Under 8.5": getattr(r, "corners_under8_5", None),
+                    "Over 9.5": getattr(r, "corners_over9_5", None),
+                    "Under 9.5": getattr(r, "corners_under9_5", None),
+                    "Over 10.5": getattr(r, "corners_over10_5", None),
+                    "Under 10.5": getattr(r, "corners_under10_5", None),
+                    "Over 11.5": getattr(r, "corners_over11_5", None),
+                    "Under 11.5": getattr(r, "corners_under11_5", None),
+                }
+                mdf = {k: f"{v:.1%}" if v else "—" for k, v in markets.items()}
+                st.dataframe(pd.DataFrame(mdf, index=["P"]).T.rename(columns={"P": "Pravděp."}), use_container_width=True)
+
+
+# ── TAB 6: Tabulka ─────────────────────────────────────────────────────────────
 
 with tab_standings:
     st.subheader("Ligová tabulka")

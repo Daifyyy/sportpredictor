@@ -114,6 +114,41 @@ class FootballFetcher:
         if fetched:
             print(f"  Enriched {fetched} fixtures with match statistics")
 
+    def enrich_full_history(self, fixtures: List[Fixture], max_new: int = 100,
+                            interval: float = 2.0) -> int:
+        """Fetch statistics for FT fixtures not yet enriched (corners model training).
+
+        TTL=-1 ensures first run fetches from API, subsequent runs from SQLite cache.
+        max_new  — max API calls per run; default 100 (safe daily budget across all leagues).
+        interval — seconds between API calls; default 2.0s ≈ 30 req/min.
+        Returns number of newly enriched fixtures.
+        """
+        import time
+
+        unenriched = sorted(
+            [f for f in fixtures if f.result is not None and f.home_stats is None],
+            key=lambda f: f.date,
+            reverse=True,  # newest first — current season gets enriched before older history
+        )
+        if not unenriched:
+            print(f"  enrich_full_history: all fixtures already enriched")
+            return 0
+
+        print(f"  enrich_full_history: {len(unenriched)} unenriched fixtures, fetching up to {max_new}")
+        fetched = 0
+        for fx in unenriched[:max_new]:
+            stats = self.get_fixture_statistics(fx.id)
+            if stats:
+                fx.home_stats = stats.get(fx.home_team.id)
+                fx.away_stats = stats.get(fx.away_team.id)
+                fetched += 1
+            if fetched < min(max_new, len(unenriched)) and interval > 0:
+                time.sleep(interval)
+
+        still_pending = len(unenriched) - fetched
+        print(f"  enrich_full_history: {fetched} enriched, {still_pending} still pending")
+        return fetched
+
     def get_fixture_injuries(
         self, fixture: Fixture, league_id: int, season: int
     ) -> Tuple[List[PlayerInjury], List[PlayerInjury], int, int, int, int]:
@@ -325,6 +360,7 @@ class FootballFetcher:
             # Both goals must be non-None — API sometimes returns None mid-match or for postponed fixtures
             result=MatchResult(int(home_g), int(away_g)) if (home_g is not None and away_g is not None) else None,
             status=f["status"]["short"],
+            referee=f.get("referee") or None,
         )
 
     def _parse_odds(self, fixture_id: int, data: dict) -> List[Odds]:

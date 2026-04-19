@@ -27,6 +27,7 @@ class FeatureEngineer:
         # Sorted fixture IDs for binary past lookup
         self._sorted_fixtures: List[Fixture] = []
         self._fixture_pos:     Dict[int, int] = {}  # fixture_id → position in sorted list
+        self._referee_index:   Dict[str, List[int]] = {}  # referee → list of total goals per game
 
     # ── Precompute ────────────────────────────────────────────────────────────
 
@@ -94,6 +95,14 @@ class FeatureEngineer:
                 [f.result.home_goals + f.result.away_goals for f in sorted_hist]
             )) / 2
 
+        # Referee index — total goals per game keyed by referee name
+        self._referee_index = {}
+        for f in sorted_hist:
+            if f.referee:
+                self._referee_index.setdefault(f.referee, []).append(
+                    f.result.home_goals + f.result.away_goals
+                )
+
     # ── Build features ────────────────────────────────────────────────────────
 
     def build_features(self, fixture: Fixture, history: List[Fixture]) -> Dict[str, float]:
@@ -147,6 +156,7 @@ class FeatureEngineer:
         features.update(self._consistency(away_matches, away_id, prefix="away"))
         features.update(self._season_ppg(season_home, season_away, home_id, away_id))
         features.update(self._stats_features(home_matches, away_matches, home_id, away_id))
+        features.update(self._referee_features(fixture.referee))
         return features
 
     # ── Feature functions (accept pre-filtered matches) ───────────────────────
@@ -351,6 +361,23 @@ class FeatureEngineer:
             features["xg_diff"] = round(h["xg"] - a["xg"], 3)
 
         return features
+
+    def _referee_features(self, referee: Optional[str]) -> Dict:
+        """Referee historical goal rate vs league average (display-only, does not affect model)."""
+        if not referee:
+            return {}
+        games = self._referee_index.get(referee, [])
+        n = len(games)
+        league_avg_total = self._avg_goals * 2  # total goals/game
+        result: Dict = {"referee_name": referee, "referee_n_games": n}
+        if n >= 5 and league_avg_total > 0:
+            ref_avg = sum(games) / n
+            # Bayesian shrinkage toward league avg (prior weight = 20 games)
+            blended = (n * ref_avg + 20 * league_avg_total) / (n + 20)
+            factor = blended / league_avg_total
+            result["referee_avg_goals"] = round(ref_avg, 3)
+            result["referee_goal_factor"] = round(max(0.80, min(1.20, factor)), 4)
+        return result
 
     def _season_ppg(self, home_season: List[Fixture], away_season: List[Fixture],
                     home_id: int, away_id: int) -> Dict:

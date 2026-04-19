@@ -55,19 +55,30 @@ class APIClient:
         self.rate_limiter.wait()
         url = f"{self.settings.base_url}/{endpoint}"
 
-        try:
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+        for attempt in range(3):
+            try:
+                response = self.session.get(url, params=params, timeout=30)
 
-            if data.get("errors"):
-                logger.error(f"API error: {data['errors']}")
+                if response.status_code == 429:
+                    wait = 60 * (attempt + 1)
+                    logger.warning(f"429 rate limit — waiting {wait}s (attempt {attempt + 1}/3)")
+                    time.sleep(wait)
+                    continue
+
+                response.raise_for_status()
+                data = response.json()
+
+                if data.get("errors"):
+                    logger.error(f"API error: {data['errors']}")
+                    return None
+
+                self.cache.set(cache_key, data, ttl)
+                logger.debug(f"API fetch: {endpoint} {params}")
+                return data
+
+            except requests.RequestException as e:
+                logger.error(f"Request failed: {e}")
                 return None
 
-            self.cache.set(cache_key, data, ttl)
-            logger.debug(f"API fetch: {endpoint} {params}")
-            return data
-
-        except requests.RequestException as e:
-            logger.error(f"Request failed: {e}")
-            return None
+        logger.error(f"All 3 attempts failed for {endpoint} {params}")
+        return None

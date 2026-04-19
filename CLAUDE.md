@@ -60,21 +60,22 @@ The data flow is: `APIClient` (with cache) → `FootballFetcher` → `FeatureEng
 - **Cup leagues**: `champions_league`, `europa_league`, `conference_league` (defined in `CUP_LEAGUES` in ensemble.py)
 - **DB**: Supabase — `tracked_predictions` (user picks) + `fixture_predictions` (daily pre-computed cache) + `resolved_fixture_predictions` (10-day archive of played matches)
 - **Automation**: GitHub Actions — `predict.yml` (10:00 UTC) + `resolve.yml` (23:00 UTC)
-- **Dashboard**: Streamlit Community Cloud (`dashboard.py`), reads DB directly. **5 tabs**: Predikce / Sledované / Výsledky / Statistiky / Tabulka
+- **Dashboard**: Streamlit Community Cloud (`dashboard.py`), reads DB directly. **6 tabs**: Predikce / Sledované / Výsledky / Statistiky / 🔄 Rohy / Tabulka
 - **API status sidebar**: `fetch_api_status()` volá `/status` endpoint přímo (TTL 5 min), zobrazuje plán, denní requesty/limit, upozornění na Free plán (100 req/den, odds/injuries nedostupné)
 - **Výsledky tab**: tabulka obsahuje sloupce P(H)%, P(D)%, P(A)%, Tip modelu, Správně (1X2) + P(G1-3)%, G1-3 (✅/❌ zda zápas skončil 1–3 góly). Summary řádek zobrazuje accuracy pro oba typy.
 - **Kalibrace (Statistiky tab)**: reliability diagramy renderovány vertikálně (ne 3 sloupce) — čitelné na mobilu
 - **Tabulka tab**: ligová tabulka přes `/standings` endpoint. Přepínač Celková / Doma / Venku. TTL=24h (max 1 API volání/den na ligu). Pro poháry ve vyřazovací fázi vrací prázdný výsledek. Responsivní HTML tabulka — desktop zobrazí vše, mobil skryje název týmu + GF/GA/Forma.
 
-## Dashboard tabs (5)
+## Dashboard tabs (6)
 
 1. **Predikce** — HTML tabulka (responsivní: PC = logo+název, mobil = jen logo); sloupce H% D% A% O2.5 U2.5 G1-3 G2-4 BTTS_Y BTTS_N; zelená ≥65%. Pod tabulkou dvě sekce:
    - **📌 Rychlé sledování** — pro každý zápas: caption s názvem zápasu + 1 řada 9 tlačítek (`st.columns(9)`, `use_container_width=True`): H D A O2.5 U2.5 G1-3 G2-4 B+ B-. Jeden klik = okamžité přidání, `st.toast()` potvrzení.
    - **Detailní analýza** — expandery. Pořadí sekcí v každém expanderu: (1) `render_prediction_stats` — dual-bar chart předpovídaného průběhu, (2) `render_match_detail` — xG metriky + forma + H2H tabulky, (3) `render_bet_validation` — signály Goals1-3 / Výhra domácích, (4) `render_injuries` — zranění, (5) `render_lineups` — sestavy, (6) tracking form. Expander label: `🚑` pokud zranění, `⚽` pokud dostupné sestavy. Tracking používá `st.form` (selectbox + `st.form_submit_button`) — selectbox nehlásí rerun, expander zůstane otevřený při změně výběru, rerun nastane až po kliknutí Sledovat.
-2. **Sledované** — filtr liga/stav; `tracked_prob` (přidáno) vs `model_prob` (aktuální) + delta s 🟢🟡🔴; resolve button. Vývoj pravděpodobnosti (sloupec Vývoj) se zobrazuje i u vyřešených predikcí — podmínka `r.correct is None` byla odstraněna (dashboard.py:1028).
+2. **Sledované** — filtr liga/stav; `tracked_prob` (přidáno) vs `model_prob` (aktuální) + delta s 🟢🟡🔴; resolve button. Vývoj pravděpodobnosti (sloupec Vývoj) se zobrazuje i u vyřešených predikcí.
 3. **Výsledky** — archiv resolved_fixture_predictions, accuracy modelu
-4. **Statistiky** — accuracy by type/league + reliability diagram
-5. **Tabulka** — `/standings` endpoint; přepínač Celková/Doma/Venku; responsivní HTML tabulka s logem každého týmu; desktop: # | logo | název | Z V R P | GF GA | +/- | Forma | Body; mobil: skryje název, GF, GA, Forma; Forma barevná (W=zelená, D=šedá, L=červená); TTL=24h. `.sth-pts` má `color:inherit` (viditelné v light i dark mode)
+4. **Statistiky** — 3 sekce: (1) Celkový přehled (metriky goals vs corners, avg P správných/špatných tipů), (2) ⚽ Model výsledků & gólů — type/league breakdown + reliability diagramy H/D/A + gólové markety, (3) 🔄 Model rohů — type/league breakdown + reliability diagram corners marketů (aktivní po ≥20 archivovaných zápasech s actual_corners)
+5. **🔄 Rohy** — tabulka λ/μ/Σ + O/U 8.5–11.5 (zelená ≥65%); rychlé sledování C8+/C8-…C11+/C11-; expandery s barchart; `save_tracking()` volá se pro konzistenci se Sledované tab
+6. **Tabulka** — `/standings` endpoint; přepínač Celková/Doma/Venku; responsivní HTML tabulka; TTL=24h. `.sth-pts` má `color:inherit` (viditelné v light i dark mode)
 
 ## Validace sázky (render_bet_validation)
 
@@ -96,12 +97,12 @@ Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, 
 
 ## scripts/predict.py flow (GitHub Actions 10:00 UTC)
 
-1. Phase 1: domestic leagues → train ensemble, collect `dc_all.attack/defence` as cup priors
-2. Phase 2: cup leagues → train with domestic priors as MLE x0 (Varianta C)
-3. Calibration: `build_calibrators()` — jeden walk-forward průchod dc_all; vrací `(ProbabilityCalibrator, GoalCalibrator)`; cachováno na disk, přetrénuje se jen při ≥50 nových zápasech
-4. `archive_resolved_fixtures()` — for each league: check FT fixtures v `completed` listu (bez extra API volání), batch DB check na již archivované, enrich only involved teams' recent fixtures (last 8), save to `resolved_fixture_predictions` with `features_json`
-5. DELETE stale rows + INSERT new upcoming predictions (calibrated probabilities)
-6. `update_tracked_probs()` — update `model_prob` for unresolved tracked_predictions
+1. Phase 1: domestic leagues → train goals ensemble, collect `dc_all.attack/defence` as cup priors; `enrich_full_history(completed, max_new=100)` → `train_corners_ensemble()` — corners model uložen do `models/saved/`
+2. Phase 2: cup leagues → train goals ensemble s domestic priors (Varianta C); corners přeskočeny
+3. Calibration: `build_calibrators()` — walk-forward dc_all → `(ProbabilityCalibrator, GoalCalibrator)`; disk cache, přetrénuje se jen při ≥50 nových zápasech
+4. `archive_resolved_fixtures()` — FT fixtures → `resolved_fixture_predictions` s features_json + `actual_corners_home/away` z `fx.home_stats/away_stats`
+5. DELETE + INSERT upcoming predictions (calibrated probabilities + corners sloupce)
+6. `update_tracked_probs()` — aktualizuje `model_prob` pro nevyřešené tracked_predictions (včetně Corners_ typů)
 
 ## FootballFetcher methods
 
@@ -112,6 +113,7 @@ Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, 
 - `enrich_with_statistics(fixtures, max_per_team)` — in-place, last N per team
 - `get_fixture_injuries(fixture, league_id, season)` — `(home_inj, away_inj, home_gf, away_gf, home_ga, away_ga)` — 6 hodnot; goals_against z `_get_team_season_stats()`
 - `get_fixture_lineups(fixture)` — `(home_lineup, away_lineup)` as `Optional[FixtureLineup]`; TTL=30min (announced ~1h before kickoff, empty before that)
+- `enrich_full_history(fixtures, max_new=100, interval=2.0)` — fetch `/fixtures/statistics` pro neobohatené FT fixtures; newest-first; TTL=-1; pro corners model
 - `get_standings(league)` — list of standings groups, TTL=24h (1 group for domestic, N for cup phases)
 - `get_odds(fixture_id)` — all bookmakers, TTL=15min
 
@@ -157,7 +159,19 @@ Každá sekce zobrazí souhrn "X/4 signálů zelených" barevně (zelená ≥3, 
 
 - ID 11 = 1xBet; ID 1 = Bet365; ID 23 = Pinnacle (prázdné odpovědi)
 
+## Corners model (implementováno)
+
+- `models/corners.py` — `CornersPredictor` (čisté Poisson MLE, bez DC korekce) + `EnsembleCornersPredictor` (blend all/season/recent, stejné váhy jako goals) + `train_corners_ensemble()`
+- `data/models.py` — `CornersPrediction` dataclass
+- `data/fetcher.py` — `enrich_full_history(fixtures, max_new=100, interval=2.0)` — newest-first, TTL=-1, bezpečné pro paid plán
+- `scripts/train_corners_only.py` — standalone enrichment + trénink bez zásahu do DB
+- `api/client.py` — 429 retry s exponenciálním backoffem (60s / 120s / 180s)
+- DB sloupce v `fixture_predictions` + `resolved_fixture_predictions`: `expected_corners_home/away`, `corners_over/under 8.5–11.5`, `actual_corners_home/away` ← Supabase ALTER TABLE **již provedeno**
+- Dashboard: 6 tabů (+ 🔄 Rohy), Statistiky rozšířena o corners sekci, `save_tracking()` podporuje Corners_ typy, `_PROB_FIELD` + `PREDICTION_TYPES` rozšířeny
+
+**Enrich stav:** probíhá postupně přes GitHub Actions (100 fixtures/liga/run, newest-first → c_season a c_recent jsou funkční od prvního runu).
+
 ## Planned next steps
 
-1. **Value bety** — betting/ je prázdná, predict.py netahá odds ani nepočítá edge
+1. **Value bety** — `betting/` je prázdná, predict.py netahá odds ani nepočítá edge
 2. **Backtesting tab** v dashboardu

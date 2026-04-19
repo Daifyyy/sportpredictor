@@ -24,6 +24,7 @@ from db.models import Base, FixturePrediction, ResolvedFixturePrediction, Tracke
 from db.session import SessionLocal, engine
 from features.engineer import FeatureEngineer
 from models.calibrator import GoalCalibrator, ProbabilityCalibrator
+from models.corners import EnsembleCornersPredictor, train_corners_ensemble
 from models.ensemble import CUP_LEAGUES, EnsembleDCPredictor
 from models.injury import InjuryAdjuster
 from models.poisson import DixonColesPredictor
@@ -210,6 +211,8 @@ def archive_resolved_fixtures(db, fetcher: "FootballFetcher", league_key: str, c
             key=lambda x: x[1],
         )[0]
 
+        actual_corners_home = fx.home_stats.corners if fx.home_stats else None
+        actual_corners_away = fx.away_stats.corners if fx.away_stats else None
         db.add(ResolvedFixturePrediction(
             fixture_id=row.fixture_id,
             league=league_key,
@@ -234,6 +237,18 @@ def archive_resolved_fixtures(db, fetcher: "FootballFetcher", league_key: str, c
             correct=(outcome == predicted),
             features_json=json.dumps(feats) if feats else None,
             computed_at=row.computed_at,
+            expected_corners_home=getattr(row, "expected_corners_home", None),
+            expected_corners_away=getattr(row, "expected_corners_away", None),
+            corners_over8_5=getattr(row, "corners_over8_5", None),
+            corners_under8_5=getattr(row, "corners_under8_5", None),
+            corners_over9_5=getattr(row, "corners_over9_5", None),
+            corners_under9_5=getattr(row, "corners_under9_5", None),
+            corners_over10_5=getattr(row, "corners_over10_5", None),
+            corners_under10_5=getattr(row, "corners_under10_5", None),
+            corners_over11_5=getattr(row, "corners_over11_5", None),
+            corners_under11_5=getattr(row, "corners_under11_5", None),
+            actual_corners_home=actual_corners_home,
+            actual_corners_away=actual_corners_away,
         ))
         print(f"  Archived: {row.home_team} vs {row.away_team}  {hs}-{as_} ({outcome})")
 
@@ -246,6 +261,14 @@ _PROB_FIELD = {
     "Under2.5": "under2_5", "Over2.5": "over2_5",
     "Goals1-3": "goals1_3", "Goals2-4": "goals2_4",
     "BTTS_Yes": "btts_yes", "BTTS_No": "btts_no",
+    "Corners_Over8.5":   "corners_over8_5",
+    "Corners_Under8.5":  "corners_under8_5",
+    "Corners_Over9.5":   "corners_over9_5",
+    "Corners_Under9.5":  "corners_under9_5",
+    "Corners_Over10.5":  "corners_over10_5",
+    "Corners_Under10.5": "corners_under10_5",
+    "Corners_Over11.5":  "corners_over11_5",
+    "Corners_Under11.5": "corners_under11_5",
 }
 
 
@@ -342,6 +365,7 @@ def main():
         domestic_attack: dict = {}
         domestic_defence: dict = {}
         domestic_results: dict = {}  # league_key -> (completed, model)
+        corners_models: dict = {}    # league_key -> EnsembleCornersPredictor | None
 
         for league_key, cfg in settings.leagues.items():
             if league_key in CUP_LEAGUES:
@@ -356,6 +380,15 @@ def main():
             # Merge team parameters into global prior dicts (team IDs are unique across API-Football)
             domestic_attack.update(model.dc_all.attack)
             domestic_defence.update(model.dc_all.defence)
+
+            # Corners: enrich history with statistics, then train corners ensemble
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            league_slug = cfg.name.lower().replace(" ", "_")
+            fetcher.enrich_full_history(completed)
+            cm = train_corners_ensemble(completed, cfg.season, MODELS_DIR, league_slug)
+            corners_models[league_key] = cm
+            if cm:
+                print(f"  Corners ensemble ready for {cfg.name}")
 
         print(f"\n[Prior] Collected {len(domestic_attack)} teams from domestic leagues")
 
@@ -446,6 +479,7 @@ def main():
             prob_cal = calibrators.get(league_key)
             goal_cal = goal_calibrators.get(league_key)
 
+            corners_model = corners_models.get(league_key)  # None for cups
             saved_predictions: dict = {}  # fixture_id -> FixturePrediction, for tracked prob update
             for fx in upcoming:
                 pred = model.predict(fx)
@@ -483,6 +517,8 @@ def main():
                 else:
                     ph, pd_val, pa = pred.prob_home, pred.prob_draw, pred.prob_away
 
+                cp = corners_model.predict_corners(fx) if corners_model else None
+
                 prev = prev_vals.get(fx.id)
                 row = FixturePrediction(
                     fixture_id=fx.id,
@@ -507,10 +543,21 @@ def main():
                     prev_prob_draw=prev[1] if prev else None,
                     prev_prob_away=prev[2] if prev else None,
                     prev_computed_at=prev[3] if prev else None,
+                    expected_corners_home=cp.lambda_home if cp else None,
+                    expected_corners_away=cp.mu_away if cp else None,
+                    corners_over8_5=cp.over8_5 if cp else None,
+                    corners_under8_5=cp.under8_5 if cp else None,
+                    corners_over9_5=cp.over9_5 if cp else None,
+                    corners_under9_5=cp.under9_5 if cp else None,
+                    corners_over10_5=cp.over10_5 if cp else None,
+                    corners_under10_5=cp.under10_5 if cp else None,
+                    corners_over11_5=cp.over11_5 if cp else None,
+                    corners_under11_5=cp.under11_5 if cp else None,
                 )
                 db.add(row)
                 saved_predictions[fx.id] = row
-                print(f"  {fx.home_team.name} vs {fx.away_team.name} | H:{ph:.0%} D:{pd_val:.0%} A:{pa:.0%} | λ={lam_final:.2f} μ={mu_final:.2f}")
+                corners_str = f" | C:{cp.lambda_home:.1f}+{cp.mu_away:.1f}" if cp else ""
+                print(f"  {fx.home_team.name} vs {fx.away_team.name} | H:{ph:.0%} D:{pd_val:.0%} A:{pa:.0%} | λ={lam_final:.2f} μ={mu_final:.2f}{corners_str}")
 
             db.commit()
             print(f"  Saved {len(upcoming)} predictions.")

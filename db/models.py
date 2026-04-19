@@ -35,6 +35,17 @@ class FixturePrediction(Base):
     prev_prob_draw = Column(Float, nullable=True)
     prev_prob_away = Column(Float, nullable=True)
     prev_computed_at = Column(DateTime(timezone=True), nullable=True)
+    # Corners predictions (nullable — only for domestic leagues with enriched history)
+    expected_corners_home = Column(Float, nullable=True)
+    expected_corners_away = Column(Float, nullable=True)
+    corners_over8_5   = Column(Float, nullable=True)
+    corners_under8_5  = Column(Float, nullable=True)
+    corners_over9_5   = Column(Float, nullable=True)
+    corners_under9_5  = Column(Float, nullable=True)
+    corners_over10_5  = Column(Float, nullable=True)
+    corners_under10_5 = Column(Float, nullable=True)
+    corners_over11_5  = Column(Float, nullable=True)
+    corners_under11_5 = Column(Float, nullable=True)
 
 
 class ResolvedFixturePrediction(Base):
@@ -69,6 +80,19 @@ class ResolvedFixturePrediction(Base):
     features_json = Column(Text, nullable=True)
     computed_at = Column(DateTime(timezone=True), nullable=True)
     resolved_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Corners — pre-match predictions + actual result
+    expected_corners_home = Column(Float, nullable=True)
+    expected_corners_away = Column(Float, nullable=True)
+    corners_over8_5   = Column(Float, nullable=True)
+    corners_under8_5  = Column(Float, nullable=True)
+    corners_over9_5   = Column(Float, nullable=True)
+    corners_under9_5  = Column(Float, nullable=True)
+    corners_over10_5  = Column(Float, nullable=True)
+    corners_under10_5 = Column(Float, nullable=True)
+    corners_over11_5  = Column(Float, nullable=True)
+    corners_under11_5 = Column(Float, nullable=True)
+    actual_corners_home = Column(Integer, nullable=True)
+    actual_corners_away = Column(Integer, nullable=True)
 
 
 class TrackedPrediction(Base):
