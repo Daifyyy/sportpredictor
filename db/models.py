@@ -50,7 +50,7 @@ class FixturePrediction(Base):
 
 class ResolvedFixturePrediction(Base):
     """Completed fixtures archived from fixture_predictions with actual result + pre-match features.
-    Rows are cleaned up after 10 days by resolve.py."""
+    Rows are cleaned up after 60 days by resolve.py."""
     __tablename__ = "resolved_fixture_predictions"
 
     fixture_id = Column(Integer, primary_key=True)

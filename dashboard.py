@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from scipy.stats import poisson
-from sqlalchemy.orm import Session as SASession
+from contextlib import contextmanager
 
 for _k in ["DATABASE_URL", "API_FOOTBALL_KEY"]:
     if _k in st.secrets and not os.getenv(_k):
@@ -18,7 +18,7 @@ from api.client import APIClient
 from config.settings import settings
 from data.fetcher import FootballFetcher
 from db.models import Base, FixturePrediction, ResolvedFixturePrediction, TrackedPrediction
-from db.session import engine
+from db.session import engine, SessionLocal
 from features.engineer import FeatureEngineer
 from models.ensemble import EnsembleDCPredictor
 from models.injury import InjuryAdjuster
@@ -165,8 +165,6 @@ def get_league_lineups(league_key: str) -> dict:
     lineup dict: {formation, coach, starters: [{player_id, player_name, number, pos}], substitutes: [...]}
     TTL=30min — lineups announced ~1h before kickoff, empty before that.
     """
-    from dataclasses import asdict
-
     fetcher = get_fetcher()
     cfg = settings.leagues[league_key]
     upcoming = fetcher.get_upcoming_fixtures(cfg, next_n=10)
@@ -780,8 +778,13 @@ Napiš analýzu v tomto formátu (přibližně 150–250 slov):
     return "❌ Gemini API selhalo:\n\n" + "\n\n".join(errors)
 
 
-def get_db() -> SASession:
-    return SASession(engine)
+@contextmanager
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -1679,7 +1682,7 @@ with tab_stats:
     import math as _math
 
     def _metrics_table(markets, resolved):
-        """Brier Score + Log Loss + Mean Pred + Actual Freq pro každý market."""
+        """Brier Score + Log Loss + Mean Pred + Actual Freq + Bias pro každý market."""
         eps = 1e-9
         rows_m = []
         for attr, actual_fn, label in markets:
@@ -1693,6 +1696,8 @@ with tab_stats:
             ps, ys = zip(*pairs)
             n   = len(ps)
             yi  = [int(y) for y in ys]
+            mean_pred  = sum(ps) / n
+            actual_freq = sum(yi) / n
             brier   = sum((p - y) ** 2 for p, y in zip(ps, yi)) / n
             logloss = -sum(
                 y * _math.log(p + eps) + (1 - y) * _math.log(1 - p + eps)
@@ -1703,8 +1708,9 @@ with tab_stats:
                 "N":             n,
                 "Brier ↓":       round(brier, 4),
                 "Log Loss ↓":    round(logloss, 4),
-                "Průměr modelu": f"{sum(ps)/n:.1%}",
-                "Skutečná freq": f"{sum(yi)/n:.1%}",
+                "Průměr modelu": f"{mean_pred:.1%}",
+                "Skutečná freq": f"{actual_freq:.1%}",
+                "Bias":          round((mean_pred - actual_freq) * 100, 1),
             })
         if not rows_m:
             st.caption("Nedostatek dat pro výpočet metrik.")
@@ -1727,10 +1733,19 @@ with tab_stats:
             else:
                 return "background-color: #7a1a1a; color: white"
 
+        def _color_bias(val):
+            if abs(val) <= 2.0:
+                return "background-color: #1a7a3a; color: white"
+            elif abs(val) <= 5.0:
+                return "background-color: #7a6a1a; color: white"
+            else:
+                return "background-color: #7a1a1a; color: white"
+
         styled_m = (
             df_m.style
             .map(_color_brier,   subset=["Brier ↓"])
             .map(_color_logloss, subset=["Log Loss ↓"])
+            .map(_color_bias,    subset=["Bias"])
         )
         st.dataframe(styled_m, use_container_width=True, hide_index=True)
 
@@ -1778,7 +1793,7 @@ with tab_stats:
                 )
 
                 st.markdown("#### Kalibrace — gólové markety")
-                st.caption("Ověřuje přesnost GoalCalibrátoru — body by měly ležet na diagonále.")
+                st.caption("Ověřuje přesnost GoalMarketCalibrátoru — body by měly ležet na diagonále. Bias sloupec = průměr modelu − skutečná frekvence (ideálně ≈ 0).")
                 _reliability_section(
                     [
                         ("over2_5",  lambda r: (r.home_score + r.away_score) > 2,        "Over 2.5"),

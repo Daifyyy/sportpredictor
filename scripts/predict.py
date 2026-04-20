@@ -23,7 +23,13 @@ from data.models import Prediction
 from db.models import Base, FixturePrediction, ResolvedFixturePrediction, TrackedPrediction
 from db.session import SessionLocal, engine
 from features.engineer import FeatureEngineer
-from models.calibrator import CornersCalibrator, GoalCalibrator, ProbabilityCalibrator
+from models.calibrator import (
+    CornersCalibrator,
+    GOAL_MARKETS,
+    GoalCalibrator,
+    GoalMarketCalibrator,
+    ProbabilityCalibrator,
+)
 from models.corners import (
     CornersPredictor,
     EnsembleCornersPredictor,
@@ -302,33 +308,57 @@ def update_tracked_probs(db, saved: dict) -> int:
 
 
 def build_calibrators(
-    completed, min_train: int = 100, retrain_every: int = 50
-) -> tuple[ProbabilityCalibrator | None, GoalCalibrator | None]:
-    """Walk-forward calibration using dc_all only (single pass for both calibrators).
+    completed, league_key: str = "", min_train: int = 100, retrain_every: int = 50
+) -> tuple[ProbabilityCalibrator | None, GoalCalibrator | None, GoalMarketCalibrator | None]:
+    """Walk-forward calibration using full EnsembleDCPredictor at each window.
 
-    Retrains dc_all every `retrain_every` matches, predicts the next fixture.
-    Collects out-of-sample samples for:
-      - ProbabilityCalibrator: (prob_H, prob_D, prob_A, actual_outcome)
-      - GoalCalibrator:        (λ+μ, actual_total_goals)
+    At each retrain point, trains dc_all + dc_season + dc_recent on the training
+    slice and uses EnsembleDCPredictor predictions — the same blend used in
+    production. This aligns calibrator training with the actual prediction pipeline.
 
-    Returns (None, None) if < 80 samples collected.
+    Returns (None, None, None) if < 80 out-of-sample samples collected.
     """
     if len(completed) < min_train + 30:
-        return None, None
+        return None, None, None
+
+    completed_sorted = sorted(completed, key=lambda f: f.date)
 
     samples_ph, samples_pd, samples_pa, actuals = [], [], [], []
     predicted_totals, actual_totals = [], []
-    model: DixonColesPredictor | None = None
+    gm_preds: dict = {m: [] for m in GOAL_MARKETS}
+    gm_actuals: dict = {m: [] for m in GOAL_MARKETS}
 
-    for i in range(min_train, len(completed)):
-        if model is None or (i - min_train) % retrain_every == 0:
-            dc = DixonColesPredictor()
-            dc.train(completed[:i])
-            model = dc
+    ensemble: EnsembleDCPredictor | None = None
 
-        fx = completed[i]
+    for i in range(min_train, len(completed_sorted)):
+        if ensemble is None or (i - min_train) % retrain_every == 0:
+            train_slice = completed_sorted[:i]
+            cur_season = completed_sorted[i].season
+            cur_date = completed_sorted[i].date
+
+            dc_all = DixonColesPredictor()
+            dc_all.train(train_slice)
+
+            season_slice = [f for f in train_slice if f.season == cur_season]
+            if len(season_slice) >= 30:
+                dc_season = DixonColesPredictor()
+                dc_season.train(season_slice)
+            else:
+                dc_season = dc_all
+
+            cutoff = cur_date - timedelta(days=60)
+            recent_slice = [f for f in train_slice if f.date >= cutoff]
+            if len(recent_slice) >= 30:
+                dc_recent = DixonColesPredictor()
+                dc_recent.train(recent_slice)
+            else:
+                dc_recent = None
+
+            ensemble = EnsembleDCPredictor(dc_all, dc_season, dc_recent, league_key=league_key)
+
+        fx = completed_sorted[i]
         try:
-            pred = model.predict(fx)
+            pred = ensemble.predict(fx)
         except Exception:
             continue
 
@@ -345,8 +375,25 @@ def build_calibrators(
         predicted_totals.append(lam + mu)
         actual_totals.append(fx.result.home_goals + fx.result.away_goals)
 
+        # Goal market actual outcomes
+        total = fx.result.home_goals + fx.result.away_goals
+        btts = fx.result.home_goals > 0 and fx.result.away_goals > 0
+        gp = pred.goal_probs
+        gm_preds["over2_5"].append(gp.get("over2_5", 0.0))
+        gm_actuals["over2_5"].append(float(total > 2))
+        gm_preds["under2_5"].append(gp.get("under2_5", 0.0))
+        gm_actuals["under2_5"].append(float(total <= 2))
+        gm_preds["goals1_3"].append(gp.get("goals1_3", 0.0))
+        gm_actuals["goals1_3"].append(float(1 <= total <= 3))
+        gm_preds["goals2_4"].append(gp.get("goals2_4", 0.0))
+        gm_actuals["goals2_4"].append(float(2 <= total <= 4))
+        gm_preds["btts_yes"].append(gp.get("btts_yes", 0.0))
+        gm_actuals["btts_yes"].append(float(btts))
+        gm_preds["btts_no"].append(gp.get("btts_no", 0.0))
+        gm_actuals["btts_no"].append(float(not btts))
+
     if len(actuals) < 80:
-        return None, None
+        return None, None, None
 
     prob_cal = ProbabilityCalibrator()
     prob_cal.fit(samples_ph, samples_pd, samples_pa, actuals)
@@ -354,7 +401,10 @@ def build_calibrators(
     goal_cal = GoalCalibrator()
     goal_cal.fit(predicted_totals, actual_totals)
 
-    return prob_cal, goal_cal
+    gmarket_cal = GoalMarketCalibrator()
+    gmarket_cal.fit(gm_preds, gm_actuals)
+
+    return prob_cal, goal_cal, gmarket_cal
 
 
 def build_corners_calibrator(
@@ -482,45 +532,55 @@ def main():
             cup_results[league_key] = (completed, model)
 
         # Build per-league calibrators — load from disk cache if < 50 new matches since last fit
-        print("\n[Calibration] Fitting calibrators (H/D/A + goals)...")
+        print("\n[Calibration] Fitting calibrators (H/D/A + goals + goal markets)...")
         calibrators: dict[str, ProbabilityCalibrator | None] = {}
         goal_calibrators: dict[str, GoalCalibrator | None] = {}
+        gmarket_calibrators: dict[str, GoalMarketCalibrator | None] = {}
 
         for league_key, (completed, _) in {**domestic_results, **cup_results}.items():
-            hda_path  = MODELS_DIR / f"calibrator_{league_key}_hda.joblib"
-            goal_path = MODELS_DIR / f"calibrator_{league_key}_goals.joblib"
-            meta_path = MODELS_DIR / f"calibrator_{league_key}_meta.json"
+            hda_path     = MODELS_DIR / f"calibrator_{league_key}_hda.joblib"
+            goal_path    = MODELS_DIR / f"calibrator_{league_key}_goals.joblib"
+            gmarket_path = MODELS_DIR / f"calibrator_{league_key}_gmarket.joblib"
+            meta_path    = MODELS_DIR / f"calibrator_{league_key}_meta.json"
             n_completed = len(completed)
-            prob_cal = goal_cal = None
+            prob_cal = goal_cal = gmarket_cal = None
 
-            if hda_path.exists() and goal_path.exists() and meta_path.exists():
+            if hda_path.exists() and goal_path.exists() and gmarket_path.exists() and meta_path.exists():
                 try:
                     meta = json.loads(meta_path.read_text())
                     new_matches = n_completed - meta.get("n_completed", 0)
                     if new_matches < 50:
-                        prob_cal = joblib.load(hda_path)
-                        goal_cal = joblib.load(goal_path)
+                        prob_cal    = joblib.load(hda_path)
+                        goal_cal    = joblib.load(goal_path)
+                        gmarket_cal = joblib.load(gmarket_path)
                         print(f"  {settings.leagues[league_key].name}: loaded from cache (+{new_matches} new matches)")
                 except Exception:
                     pass  # corrupted cache — fall through to retrain
 
             if prob_cal is None:
-                prob_cal, goal_cal = build_calibrators(completed)
+                prob_cal, goal_cal, gmarket_cal = build_calibrators(completed, league_key=league_key)
                 if prob_cal:
                     MODELS_DIR.mkdir(parents=True, exist_ok=True)
                     joblib.dump(prob_cal, hda_path)
                     joblib.dump(goal_cal, goal_path)
+                    if gmarket_cal:
+                        joblib.dump(gmarket_cal, gmarket_path)
                     meta_path.write_text(json.dumps({"n_completed": n_completed}))
+                    biases_str = " | ".join(
+                        f"{m}:{b:+.3f}" for m, b in (gmarket_cal.biases if gmarket_cal else {}).items()
+                    )
                     print(
                         f"  {settings.leagues[league_key].name}: {prob_cal.n_samples} samples"
                         f" | ECE {prob_cal.ece_before:.4f}→{prob_cal.ece_after:.4f}"
                         f" | goal bias {goal_cal.mean_bias:+.3f} xG"
+                        + (f"\n    market biases: {biases_str}" if biases_str else "")
                     )
                 else:
                     print(f"  {settings.leagues[league_key].name}: not enough samples, skipping")
 
             calibrators[league_key] = prob_cal
             goal_calibrators[league_key] = goal_cal
+            gmarket_calibrators[league_key] = gmarket_cal
 
         # Save predictions for all leagues
         all_results = {**domestic_results, **cup_results}
@@ -548,8 +608,9 @@ def main():
 
             print(f"\n[{cfg.name}] Computing predictions for {len(upcoming)} upcoming fixtures...")
 
-            prob_cal = calibrators.get(league_key)
-            goal_cal = goal_calibrators.get(league_key)
+            prob_cal    = calibrators.get(league_key)
+            goal_cal    = goal_calibrators.get(league_key)
+            gmarket_cal = gmarket_calibrators.get(league_key)
 
             corners_model = corners_models.get(league_key)       # None for cups
             corners_cal   = corners_calibrators.get(league_key)  # None for cups
@@ -574,13 +635,16 @@ def main():
                     )
                     print(f"    Injuries: {', '.join(inj_names)} | λ {lam_orig:.2f}→{lam_adj:.2f} μ {mu_orig:.2f}→{mu_adj:.2f}")
 
-                # Goal calibration: scale λ/μ proportionally to match empirical total goals
-                # Corrects Poisson independence bias (model overcounts goals vs reality)
+                # Goal calibration: scale λ/μ for expected_goals display in DB
                 lam_final = pred.expected_goals_home
                 mu_final = pred.expected_goals_away
                 if goal_cal is not None:
                     lam_final, mu_final = goal_cal.transform(lam_final, mu_final)
-                    gp = predict_from_lam_mu(fx.id, lam_final, mu_final, model.dc_all.rho).goal_probs
+
+                # Goal market calibration: per-market isotonic regression
+                # Trained on ensemble predictions → directly fixes per-market biases
+                if gmarket_cal is not None:
+                    gp = gmarket_cal.transform(pred.goal_probs)
                 else:
                     gp = pred.goal_probs
 

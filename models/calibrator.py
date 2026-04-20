@@ -6,11 +6,17 @@ GoalCalibrator        — isotonic regression on λ+μ → actual total goals.
                         Corrects the Poisson independence bias: real football
                         has negative goal correlation (teams defend more when
                         trailing) → actual totals are lower than λ+μ predicts.
+GoalMarketCalibrator  — per-market isotonic regression on goal market probs.
+                        Each market (over2_5, goals1_3, btts_yes, …) has its
+                        own independent bias — unlike GoalCalibrator which
+                        applies a single λ+μ scaling to all markets at once.
 
-Both are fit on out-of-sample (walk-forward) predictions to avoid overfitting.
+All are fit on out-of-sample (walk-forward) ensemble predictions to avoid overfitting.
 """
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
+
+GOAL_MARKETS = ("over2_5", "under2_5", "goals1_3", "goals2_4", "btts_yes", "btts_no")
 
 
 class GoalCalibrator:
@@ -99,6 +105,57 @@ class ProbabilityCalibrator:
         if total <= 0:
             return prob_h, prob_d, prob_a
         return c_h / total, c_d / total, c_a / total
+
+
+class GoalMarketCalibrator:
+    """Per-market isotonic regression calibration for goal market probabilities.
+
+    Unlike GoalCalibrator (which scales λ+μ globally), calibrates each of the
+    six goal markets independently so per-market biases are corrected separately.
+    Trained on out-of-sample ensemble predictions; applied before DB insert.
+    """
+
+    def __init__(self):
+        self._irs: dict = {m: IsotonicRegression(out_of_bounds="clip") for m in GOAL_MARKETS}
+        self._fitted_markets: set = set()
+        self.n_samples: int = 0
+        self.biases: dict = {}  # market -> mean_bias (positive = model overcounts)
+
+    def fit(self, preds: dict, actuals: dict) -> None:
+        """
+        preds:   {market: [predicted_prob, ...]}
+        actuals: {market: [0.0 / 1.0, ...]}
+        """
+        n = 0
+        for m in GOAL_MARKETS:
+            x = np.array(preds.get(m, []), dtype=float)
+            y = np.array(actuals.get(m, []), dtype=float)
+            mask = ~(np.isnan(x) | np.isnan(y))
+            if mask.sum() < 20:
+                continue
+            self._irs[m].fit(x[mask], y[mask])
+            self._fitted_markets.add(m)
+            self.biases[m] = round(float(x[mask].mean() - y[mask].mean()), 4)
+            n = max(n, int(mask.sum()))
+        self.n_samples = n
+
+    def transform(self, goal_probs: dict) -> dict:
+        """Calibrate per-market. Falls back to raw prob for unfitted markets."""
+        if not self._fitted_markets:
+            return goal_probs
+        result = dict(goal_probs)
+        for m in self._fitted_markets:
+            if m in goal_probs:
+                cal = float(self._irs[m].predict([goal_probs[m]])[0])
+                result[m] = round(max(0.0, min(1.0, cal)), 4)
+        # Renormalize complementary pairs so they sum to 1
+        for over, under in (("over2_5", "under2_5"), ("btts_yes", "btts_no")):
+            if over in result and under in result:
+                total = result[over] + result[under]
+                if total > 0:
+                    result[over] = round(result[over] / total, 4)
+                    result[under] = round(1.0 - result[over], 4)
+        return result
 
 
 class CornersCalibrator(GoalCalibrator):

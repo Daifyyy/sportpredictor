@@ -107,18 +107,3 @@ class Prediction:
     expected_goals_home: Optional[float] = None
     expected_goals_away: Optional[float] = None
     goal_probs: Dict[str, float] = field(default_factory=dict)
-
-
-@dataclass
-class CornersPrediction:
-    fixture_id: int
-    lambda_home: float
-    mu_away: float
-    over8_5:  float
-    under8_5: float
-    over9_5:  float
-    under9_5: float
-    over10_5: float
-    under10_5: float
-    over11_5: float
-    under11_5: float
