@@ -101,6 +101,13 @@ class ProbabilityCalibrator:
         return c_h / total, c_d / total, c_a / total
 
 
+class CornersCalibrator(GoalCalibrator):
+    """Calibrates predicted total corners (λ+μ) to match empirical distribution.
+
+    Identical logic to GoalCalibrator — separate class for distinct disk storage.
+    """
+
+
 def _ece(probs_h, probs_d, probs_a, actuals, n_bins: int = 10) -> float:
     """Mean Expected Calibration Error across H/D/A."""
     edges = np.linspace(0, 1, n_bins + 1)

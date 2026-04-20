@@ -154,6 +154,24 @@ class EnsembleCornersPredictor:
         )
 
 
+def corners_prediction_from_lam_mu(fixture_id: int, lam: float, mu: float) -> CornersPrediction:
+    """Build a CornersPrediction from calibrated λ/μ, recomputing all O/U probabilities."""
+    total = lam + mu
+    o8,  u8  = _ou(total, 8.5)
+    o9,  u9  = _ou(total, 9.5)
+    o10, u10 = _ou(total, 10.5)
+    o11, u11 = _ou(total, 11.5)
+    return CornersPrediction(
+        fixture_id=fixture_id,
+        lambda_home=round(lam, 3),
+        mu_away=round(mu, 3),
+        over8_5=o8,   under8_5=u8,
+        over9_5=o9,   under9_5=u9,
+        over10_5=o10, under10_5=u10,
+        over11_5=o11, under11_5=u11,
+    )
+
+
 def train_corners_ensemble(
     completed: List[Fixture],
     season: int,

@@ -23,8 +23,13 @@ from data.models import Prediction
 from db.models import Base, FixturePrediction, ResolvedFixturePrediction, TrackedPrediction
 from db.session import SessionLocal, engine
 from features.engineer import FeatureEngineer
-from models.calibrator import GoalCalibrator, ProbabilityCalibrator
-from models.corners import EnsembleCornersPredictor, train_corners_ensemble
+from models.calibrator import CornersCalibrator, GoalCalibrator, ProbabilityCalibrator
+from models.corners import (
+    CornersPredictor,
+    EnsembleCornersPredictor,
+    corners_prediction_from_lam_mu,
+    train_corners_ensemble,
+)
 from models.ensemble import CUP_LEAGUES, EnsembleDCPredictor
 from models.injury import InjuryAdjuster
 from models.poisson import DixonColesPredictor
@@ -352,6 +357,44 @@ def build_calibrators(
     return prob_cal, goal_cal
 
 
+def build_corners_calibrator(
+    with_corners: list, min_train: int = 80, retrain_every: int = 30
+) -> CornersCalibrator | None:
+    """Walk-forward calibration for corners λ+μ → actual total corners.
+
+    Returns None if < 40 out-of-sample samples collected.
+    """
+    if len(with_corners) < min_train + 20:
+        return None
+
+    sorted_c = sorted(with_corners, key=lambda f: f.date)
+    predicted_totals, actual_totals = [], []
+    model: CornersPredictor | None = None
+
+    for i in range(min_train, len(sorted_c)):
+        if model is None or (i - min_train) % retrain_every == 0:
+            c = CornersPredictor()
+            c.train(sorted_c[:i])
+            model = c
+
+        if not model._fitted:
+            continue
+        fx = sorted_c[i]
+        lam, mu = model._lam_mu(fx.home_team.id, fx.away_team.id)
+        if lam <= 0 or mu <= 0:
+            continue
+
+        predicted_totals.append(lam + mu)
+        actual_totals.append(fx.home_stats.corners + fx.away_stats.corners)
+
+    if len(predicted_totals) < 40:
+        return None
+
+    cal = CornersCalibrator()
+    cal.fit(predicted_totals, actual_totals)
+    return cal
+
+
 def main():
     Base.metadata.create_all(engine)
     client = APIClient(settings)
@@ -364,8 +407,9 @@ def main():
         # Phase 1: train domestic leagues, collect attack/defence parameters as cup priors
         domestic_attack: dict = {}
         domestic_defence: dict = {}
-        domestic_results: dict = {}  # league_key -> (completed, model)
-        corners_models: dict = {}    # league_key -> EnsembleCornersPredictor | None
+        domestic_results: dict = {}      # league_key -> (completed, model)
+        corners_models: dict = {}        # league_key -> EnsembleCornersPredictor | None
+        corners_calibrators: dict = {}   # league_key -> CornersCalibrator | None
 
         for league_key, cfg in settings.leagues.items():
             if league_key in CUP_LEAGUES:
@@ -389,6 +433,34 @@ def main():
             corners_models[league_key] = cm
             if cm:
                 print(f"  Corners ensemble ready for {cfg.name}")
+
+            # Corners calibrator: walk-forward λ+μ → actual corners scaling
+            with_corners = [
+                f for f in completed
+                if f.home_stats and f.home_stats.corners is not None
+                and f.away_stats and f.away_stats.corners is not None
+            ]
+            c_cal_path  = MODELS_DIR / f"calibrator_{league_key}_corners.joblib"
+            c_cal_meta  = MODELS_DIR / f"calibrator_{league_key}_corners_meta.json"
+            corners_cal = None
+            if c_cal_path.exists() and c_cal_meta.exists():
+                try:
+                    meta = json.loads(c_cal_meta.read_text())
+                    if len(with_corners) - meta.get("n_corners", 0) < 50:
+                        corners_cal = joblib.load(c_cal_path)
+                        print(f"  Corners calibrator: loaded from cache (+{len(with_corners) - meta.get('n_corners', 0)} new)")
+                except Exception:
+                    pass
+            if corners_cal is None:
+                corners_cal = build_corners_calibrator(with_corners)
+                if corners_cal:
+                    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+                    joblib.dump(corners_cal, c_cal_path)
+                    c_cal_meta.write_text(json.dumps({"n_corners": len(with_corners)}))
+                    print(f"  Corners calibrator: {corners_cal.n_samples} samples | bias {corners_cal.mean_bias:+.3f} corners")
+                else:
+                    print(f"  Corners calibrator: not enough data ({len(with_corners)} enriched fixtures)")
+            corners_calibrators[league_key] = corners_cal
 
         print(f"\n[Prior] Collected {len(domestic_attack)} teams from domestic leagues")
 
@@ -479,7 +551,8 @@ def main():
             prob_cal = calibrators.get(league_key)
             goal_cal = goal_calibrators.get(league_key)
 
-            corners_model = corners_models.get(league_key)  # None for cups
+            corners_model = corners_models.get(league_key)       # None for cups
+            corners_cal   = corners_calibrators.get(league_key)  # None for cups
             saved_predictions: dict = {}  # fixture_id -> FixturePrediction, for tracked prob update
             for fx in upcoming:
                 pred = model.predict(fx)
@@ -518,6 +591,9 @@ def main():
                     ph, pd_val, pa = pred.prob_home, pred.prob_draw, pred.prob_away
 
                 cp = corners_model.predict_corners(fx) if corners_model else None
+                if cp and corners_cal:
+                    lam_c, mu_c = corners_cal.transform(cp.lambda_home, cp.mu_away)
+                    cp = corners_prediction_from_lam_mu(cp.fixture_id, lam_c, mu_c)
 
                 prev = prev_vals.get(fx.id)
                 row = FixturePrediction(

@@ -826,6 +826,7 @@ def compute_correct(prediction_type: str, hs: int, as_: int) -> bool:
         return hs >= 1 and as_ >= 1
     if prediction_type == "BTTS_No":
         return hs == 0 or as_ == 0
+    # Corners markets cannot be resolved from goals alone — leave unresolved
     return False
 
 
@@ -1871,6 +1872,7 @@ with tab_corners:
                     result = save_tracking(cr_fixture, r.league, ptype, prob_val)
                     if result == "ok":
                         st.toast(f"✅ {r.home_team} – {r.away_team}: {ptype} přidáno")
+                        st.rerun()
                     elif result == "duplicate":
                         st.toast("⚠️ Již sledováno.", icon="⚠️")
                     else:
@@ -1954,11 +1956,18 @@ with tab_standings:
                 f"<tr><th class='sth-rank'>#</th><th class='sth-logo'></th>"
                 f"<th class='sth-name'>Tým</th>"
                 f"<th>Z</th><th>V</th><th>R</th><th>P</th>"
-                f"{header_extra}+/-{header_form}{header_pts}</tr>"
+                f"{header_extra}<th>+/-</th>{header_form}{header_pts}</tr>"
+            )
+
+            # For home/away views sort by home/away points (API order = total standings)
+            sorted_group = group if show_form else sorted(
+                group,
+                key=lambda e: e.get(view_key, {}).get("win", 0) * 3 + e.get(view_key, {}).get("draw", 0),
+                reverse=True,
             )
 
             rows_html = []
-            for entry in group:
+            for rank_idx, entry in enumerate(sorted_group, start=1):
                 stats  = entry.get(view_key, {})
                 goals  = stats.get("goals", {})
                 gf     = goals.get("for", 0) or 0
@@ -1969,9 +1978,10 @@ with tab_standings:
                 logo   = entry["team"].get("logo", "")
                 img    = f'<img src="{logo}" width="20" height="20" style="vertical-align:middle">' if logo else "•"
                 form_td = f"<td class='sth-extra'>{_form_html(entry.get('form', ''))}</td>" if show_form else ""
+                rank_display = entry.get("rank", rank_idx) if show_form else rank_idx
                 rows_html.append(
                     f"<tr>"
-                    f"<td class='sth-rank'>{entry.get('rank', '')}</td>"
+                    f"<td class='sth-rank'>{rank_display}</td>"
                     f"<td class='sth-logo'>{img}</td>"
                     f"<td class='sth-name'>{entry['team']['name']}</td>"
                     f"<td>{stats.get('played', 0)}</td>"
