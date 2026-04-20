@@ -1675,6 +1675,65 @@ with tab_stats:
         styled = df.style.map(_color_pct, subset=["Úspěšnost %"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
+    # ── Helper: metriky modelu ────────────────────────────────────────────────
+    import math as _math
+
+    def _metrics_table(markets, resolved):
+        """Brier Score + Log Loss + Mean Pred + Actual Freq pro každý market."""
+        eps = 1e-9
+        rows_m = []
+        for attr, actual_fn, label in markets:
+            pairs = [
+                (getattr(r, attr), actual_fn(r))
+                for r in resolved
+                if getattr(r, attr) is not None
+            ]
+            if len(pairs) < 5:
+                continue
+            ps, ys = zip(*pairs)
+            n   = len(ps)
+            yi  = [int(y) for y in ys]
+            brier   = sum((p - y) ** 2 for p, y in zip(ps, yi)) / n
+            logloss = -sum(
+                y * _math.log(p + eps) + (1 - y) * _math.log(1 - p + eps)
+                for p, y in zip(ps, yi)
+            ) / n
+            rows_m.append({
+                "Market":        label,
+                "N":             n,
+                "Brier ↓":       round(brier, 4),
+                "Log Loss ↓":    round(logloss, 4),
+                "Průměr modelu": f"{sum(ps)/n:.1%}",
+                "Skutečná freq": f"{sum(yi)/n:.1%}",
+            })
+        if not rows_m:
+            st.caption("Nedostatek dat pro výpočet metrik.")
+            return
+        df_m = pd.DataFrame(rows_m)
+
+        def _color_brier(val):
+            if val <= 0.20:
+                return "background-color: #1a7a3a; color: white"
+            elif val <= 0.25:
+                return "background-color: #7a6a1a; color: white"
+            else:
+                return "background-color: #7a1a1a; color: white"
+
+        def _color_logloss(val):
+            if val <= 0.60:
+                return "background-color: #1a7a3a; color: white"
+            elif val <= 0.70:
+                return "background-color: #7a6a1a; color: white"
+            else:
+                return "background-color: #7a1a1a; color: white"
+
+        styled_m = (
+            df_m.style
+            .map(_color_brier,   subset=["Brier ↓"])
+            .map(_color_logloss, subset=["Log Loss ↓"])
+        )
+        st.dataframe(styled_m, use_container_width=True, hide_index=True)
+
     # ── Sub-taby: Výsledky & Góly | Rohy ─────────────────────────────────────
     st.divider()
     subtab_goals, subtab_corners = st.tabs(["⚽ Výsledky & Góly", "🔄 Rohy"])
@@ -1684,6 +1743,24 @@ with tab_stats:
             st.info("Žádné vyřešené predikce výsledků/gólů.")
         else:
             _breakdown_section(goals_rows, key_suffix="goals")
+
+            if len(cal_rows) >= 10:
+                st.markdown("#### Metriky modelu")
+                st.caption("Brier Score a Log Loss — nižší = lepší. Průměr modelu vs. skutečná frekvence ověřuje kalibraci.")
+                _metrics_table(
+                    [
+                        ("prob_home", lambda r: r.actual_outcome == "H", "Výhra domácích"),
+                        ("prob_draw", lambda r: r.actual_outcome == "D", "Remíza"),
+                        ("prob_away", lambda r: r.actual_outcome == "A", "Výhra hostů"),
+                        ("over2_5",  lambda r: (r.home_score + r.away_score) > 2,        "Over 2.5"),
+                        ("under2_5", lambda r: (r.home_score + r.away_score) <= 2,       "Under 2.5"),
+                        ("goals1_3", lambda r: 1 <= (r.home_score + r.away_score) <= 3,  "Goals 1-3"),
+                        ("goals2_4", lambda r: 2 <= (r.home_score + r.away_score) <= 4,  "Goals 2-4"),
+                        ("btts_yes", lambda r: r.home_score > 0 and r.away_score > 0,    "BTTS Ano"),
+                        ("btts_no",  lambda r: not (r.home_score > 0 and r.away_score > 0), "BTTS Ne"),
+                    ],
+                    cal_rows,
+                )
 
             if len(cal_rows) >= 50:
                 st.markdown("#### Kalibrace — výsledky (H/D/A)")
@@ -1732,16 +1809,32 @@ with tab_stats:
             and getattr(r, "corners_over9_5", None) is not None
         ]
 
+        def _actual_corners(r):
+            return (r.actual_corners_home or 0) + (r.actual_corners_away or 0)
+
+        if len(cal_corners) >= 10:
+            st.markdown("#### Metriky modelu")
+            st.caption("Brier Score a Log Loss — nižší = lepší.")
+            _metrics_table(
+                [
+                    ("corners_over8_5",   lambda r: _actual_corners(r) > 8,   "Over 8.5"),
+                    ("corners_under8_5",  lambda r: _actual_corners(r) <= 8,  "Under 8.5"),
+                    ("corners_over9_5",   lambda r: _actual_corners(r) > 9,   "Over 9.5"),
+                    ("corners_under9_5",  lambda r: _actual_corners(r) <= 9,  "Under 9.5"),
+                    ("corners_over10_5",  lambda r: _actual_corners(r) > 10,  "Over 10.5"),
+                    ("corners_under10_5", lambda r: _actual_corners(r) <= 10, "Under 10.5"),
+                    ("corners_over11_5",  lambda r: _actual_corners(r) > 11,  "Over 11.5"),
+                    ("corners_under11_5", lambda r: _actual_corners(r) <= 11, "Under 11.5"),
+                ],
+                cal_corners,
+            )
+
         if len(cal_corners) >= 20:
             st.markdown("#### Kalibrace — rohové markety")
             st.caption(
                 "Reliability diagram pro Over/Under rohových trhů. "
                 "actual = skutečný počet rohů v zápase z archivu."
             )
-
-            def _actual_corners(r):
-                return (r.actual_corners_home or 0) + (r.actual_corners_away or 0)
-
             _reliability_section(
                 [
                     ("corners_over8_5",   lambda r: _actual_corners(r) > 8,   "Over 8.5"),
