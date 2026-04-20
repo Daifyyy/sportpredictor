@@ -1620,7 +1620,15 @@ with tab_stats:
             st.dataframe(tbl, use_container_width=True)
 
     # ── Helper: typ/liga breakdown ────────────────────────────────────────────
-    def _breakdown_section(rows, label_fn=None):
+    def _color_pct(val):
+        if val >= 60:
+            return "background-color: #1a7a3a; color: white"
+        elif val >= 45:
+            return "background-color: #7a6a1a; color: white"
+        else:
+            return "background-color: #7a1a1a; color: white"
+
+    def _breakdown_section(rows, label_fn=None, key_suffix=""):
         by_type: dict[str, dict]   = {}
         by_league: dict[str, dict] = {}
         for r in rows:
@@ -1631,126 +1639,127 @@ with tab_stats:
                 if r.correct:
                     bucket[key]["correct"] += 1
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**Podle typu predikce**")
-            type_data = [
+        view = st.radio(
+            "Zobrazit podle",
+            ["Podle typu", "Podle ligy"],
+            horizontal=True,
+            key=f"breakdown_view_{key_suffix}",
+        )
+
+        if view == "Podle typu":
+            data = [
                 {
                     "Typ":          label_fn(k) if label_fn else k,
                     "Počet":        v["count"],
                     "Správně":      v["correct"],
+                    "Špatně":       v["count"] - v["correct"],
                     "Úspěšnost %":  round(v["correct"] / v["count"] * 100, 1),
                 }
                 for k, v in by_type.items()
             ]
-            if type_data:
-                df_t = pd.DataFrame(type_data).sort_values("Úspěšnost %", ascending=False)
-                st.dataframe(df_t, use_container_width=True, hide_index=True)
-                st.bar_chart(df_t.set_index("Typ")["Úspěšnost %"])
-        with c2:
-            st.markdown("**Podle ligy**")
-            league_data = [
+        else:
+            data = [
                 {
                     "Liga":         leagues_display.get(k, k),
                     "Počet":        v["count"],
                     "Správně":      v["correct"],
+                    "Špatně":       v["count"] - v["correct"],
                     "Úspěšnost %":  round(v["correct"] / v["count"] * 100, 1),
                 }
                 for k, v in by_league.items()
             ]
-            if league_data:
-                df_l = pd.DataFrame(league_data).sort_values("Úspěšnost %", ascending=False)
-                st.dataframe(df_l, use_container_width=True, hide_index=True)
-                st.bar_chart(df_l.set_index("Liga")["Úspěšnost %"])
 
-    # ── MODEL VÝSLEDKŮ & GÓLŮ ─────────────────────────────────────────────────
+        if not data:
+            return
+        df = pd.DataFrame(data).sort_values("Úspěšnost %", ascending=False)
+        styled = df.style.map(_color_pct, subset=["Úspěšnost %"])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # ── Sub-taby: Výsledky & Góly | Rohy ─────────────────────────────────────
     st.divider()
-    st.markdown("### ⚽ Model výsledků & gólů")
+    subtab_goals, subtab_corners = st.tabs(["⚽ Výsledky & Góly", "🔄 Rohy"])
 
-    if not goals_rows:
-        st.info("Žádné vyřešené predikce výsledků/gólů.")
-    else:
-        _breakdown_section(goals_rows)
-
-        if len(cal_rows) >= 50:
-            st.markdown("#### Kalibrace — výsledky (H/D/A)")
-            st.caption(
-                "Reliability diagram: dobře zkalibrovaný model leží na diagonále. "
-                "Data z archivu resolved_fixture_predictions · 90% Clopper-Pearson CI."
-            )
-            _reliability_section(
-                [
-                    ("prob_home", lambda r: r.actual_outcome == "H", "Výhra domácích"),
-                    ("prob_draw", lambda r: r.actual_outcome == "D", "Remíza"),
-                    ("prob_away", lambda r: r.actual_outcome == "A", "Výhra hostů"),
-                ],
-                cal_rows,
-            )
-
-            st.markdown("#### Kalibrace — gólové markety")
-            st.caption("Ověřuje přesnost GoalCalibrátoru — body by měly ležet na diagonále.")
-            _reliability_section(
-                [
-                    ("over2_5",  lambda r: (r.home_score + r.away_score) > 2,   "Over 2.5"),
-                    ("under2_5", lambda r: (r.home_score + r.away_score) <= 2,  "Under 2.5"),
-                    ("goals1_3", lambda r: 1 <= (r.home_score + r.away_score) <= 3, "Goals 1-3"),
-                    ("goals2_4", lambda r: 2 <= (r.home_score + r.away_score) <= 4, "Goals 2-4"),
-                    ("btts_yes", lambda r: r.home_score > 0 and r.away_score > 0, "BTTS Ano"),
-                    ("btts_no",  lambda r: not (r.home_score > 0 and r.away_score > 0), "BTTS Ne"),
-                ],
-                cal_rows,
-            )
+    with subtab_goals:
+        if not goals_rows:
+            st.info("Žádné vyřešené predikce výsledků/gólů.")
         else:
-            st.info(f"Reliability diagram: potřeba ≥ 50 archivovaných zápasů (aktuálně {len(cal_rows)}).")
+            _breakdown_section(goals_rows, key_suffix="goals")
 
-    # ── MODEL ROHŮ ────────────────────────────────────────────────────────────
-    st.divider()
-    st.markdown("### 🔄 Model rohů")
+            if len(cal_rows) >= 50:
+                st.markdown("#### Kalibrace — výsledky (H/D/A)")
+                st.caption(
+                    "Reliability diagram: dobře zkalibrovaný model leží na diagonále. "
+                    "Data z archivu resolved_fixture_predictions · 90% Clopper-Pearson CI."
+                )
+                _reliability_section(
+                    [
+                        ("prob_home", lambda r: r.actual_outcome == "H", "Výhra domácích"),
+                        ("prob_draw", lambda r: r.actual_outcome == "D", "Remíza"),
+                        ("prob_away", lambda r: r.actual_outcome == "A", "Výhra hostů"),
+                    ],
+                    cal_rows,
+                )
 
-    if not corners_rows:
-        st.info("Žádné vyřešené predikce rohů. Sleduj rohy v záložce 🔄 Rohy.")
-    else:
+                st.markdown("#### Kalibrace — gólové markety")
+                st.caption("Ověřuje přesnost GoalCalibrátoru — body by měly ležet na diagonále.")
+                _reliability_section(
+                    [
+                        ("over2_5",  lambda r: (r.home_score + r.away_score) > 2,        "Over 2.5"),
+                        ("under2_5", lambda r: (r.home_score + r.away_score) <= 2,       "Under 2.5"),
+                        ("goals1_3", lambda r: 1 <= (r.home_score + r.away_score) <= 3,  "Goals 1-3"),
+                        ("goals2_4", lambda r: 2 <= (r.home_score + r.away_score) <= 4,  "Goals 2-4"),
+                        ("btts_yes", lambda r: r.home_score > 0 and r.away_score > 0,    "BTTS Ano"),
+                        ("btts_no",  lambda r: not (r.home_score > 0 and r.away_score > 0), "BTTS Ne"),
+                    ],
+                    cal_rows,
+                )
+            else:
+                st.info(f"Reliability diagram: potřeba ≥ 50 archivovaných zápasů (aktuálně {len(cal_rows)}).")
+
+    with subtab_corners:
         def _corners_label(k):
             return k.replace("Corners_", "").replace("Over", "O").replace("Under", "U")
 
-        _breakdown_section(corners_rows, label_fn=_corners_label)
+        if not corners_rows:
+            st.info("Žádné vyřešené predikce rohů. Sleduj rohy v záložce 🔄 Rohy.")
+        else:
+            _breakdown_section(corners_rows, label_fn=_corners_label, key_suffix="corners")
 
-    # Reliability diagram pro corners — potřebuje actual_corners v archivu
-    cal_corners = [
-        r for r in cal_rows
-        if getattr(r, "actual_corners_home", None) is not None
-        and getattr(r, "actual_corners_away", None) is not None
-        and getattr(r, "corners_over9_5", None) is not None
-    ]
+        cal_corners = [
+            r for r in cal_rows
+            if getattr(r, "actual_corners_home", None) is not None
+            and getattr(r, "actual_corners_away", None) is not None
+            and getattr(r, "corners_over9_5", None) is not None
+        ]
 
-    if len(cal_corners) >= 20:
-        st.markdown("#### Kalibrace — rohové markety")
-        st.caption(
-            "Reliability diagram pro Over/Under rohových trhů. "
-            "actual = skutečný počet rohů v zápase z archivu."
-        )
+        if len(cal_corners) >= 20:
+            st.markdown("#### Kalibrace — rohové markety")
+            st.caption(
+                "Reliability diagram pro Over/Under rohových trhů. "
+                "actual = skutečný počet rohů v zápase z archivu."
+            )
 
-        def _actual_corners(r):
-            return (r.actual_corners_home or 0) + (r.actual_corners_away or 0)
+            def _actual_corners(r):
+                return (r.actual_corners_home or 0) + (r.actual_corners_away or 0)
 
-        _reliability_section(
-            [
-                ("corners_over8_5",   lambda r: _actual_corners(r) > 8,  "Over 8.5"),
-                ("corners_under8_5",  lambda r: _actual_corners(r) <= 8, "Under 8.5"),
-                ("corners_over9_5",   lambda r: _actual_corners(r) > 9,  "Over 9.5"),
-                ("corners_under9_5",  lambda r: _actual_corners(r) <= 9, "Under 9.5"),
-                ("corners_over10_5",  lambda r: _actual_corners(r) > 10, "Over 10.5"),
-                ("corners_under10_5", lambda r: _actual_corners(r) <= 10,"Under 10.5"),
-                ("corners_over11_5",  lambda r: _actual_corners(r) > 11, "Over 11.5"),
-                ("corners_under11_5", lambda r: _actual_corners(r) <= 11,"Under 11.5"),
-            ],
-            cal_corners,
-        )
-    else:
-        st.info(
-            f"Reliability diagram rohů: potřeba ≥ 20 archivovaných zápasů s corners daty "
-            f"(aktuálně {len(cal_corners)}). Data se nahromadí automaticky po dalších bězích GitHub Actions."
-        )
+            _reliability_section(
+                [
+                    ("corners_over8_5",   lambda r: _actual_corners(r) > 8,   "Over 8.5"),
+                    ("corners_under8_5",  lambda r: _actual_corners(r) <= 8,  "Under 8.5"),
+                    ("corners_over9_5",   lambda r: _actual_corners(r) > 9,   "Over 9.5"),
+                    ("corners_under9_5",  lambda r: _actual_corners(r) <= 9,  "Under 9.5"),
+                    ("corners_over10_5",  lambda r: _actual_corners(r) > 10,  "Over 10.5"),
+                    ("corners_under10_5", lambda r: _actual_corners(r) <= 10, "Under 10.5"),
+                    ("corners_over11_5",  lambda r: _actual_corners(r) > 11,  "Over 11.5"),
+                    ("corners_under11_5", lambda r: _actual_corners(r) <= 11, "Under 11.5"),
+                ],
+                cal_corners,
+            )
+        else:
+            st.info(
+                f"Reliability diagram rohů: potřeba ≥ 20 archivovaných zápasů s corners daty "
+                f"(aktuálně {len(cal_corners)}). Data se nahromadí automaticky po dalších bězích GitHub Actions."
+            )
 
 
 # ── TAB 5: Rohy ────────────────────────────────────────────────────────────────
