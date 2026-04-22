@@ -48,6 +48,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models/saved")
+CALIBRATOR_VERSION = "v3"  # bump when calibration pipeline changes to invalidate disk cache
 
 
 def predict_from_lam_mu(fixture_id: int, lam: float, mu: float, rho: float) -> Prediction:
@@ -308,13 +309,19 @@ def update_tracked_probs(db, saved: dict) -> int:
 
 
 def build_calibrators(
-    completed, league_key: str = "", min_train: int = 100, retrain_every: int = 50
+    completed, league_key: str = "", min_train: int = 100, retrain_every: int = 50,
+    decay_halflife_days: int = 365,
 ) -> tuple[ProbabilityCalibrator | None, GoalCalibrator | None, GoalMarketCalibrator | None]:
     """Walk-forward calibration using full EnsembleDCPredictor at each window.
 
-    At each retrain point, trains dc_all + dc_season + dc_recent on the training
-    slice and uses EnsembleDCPredictor predictions — the same blend used in
-    production. This aligns calibrator training with the actual prediction pipeline.
+    Two-pass approach:
+      Pass 1 — collect H/D/A probs, λ+μ totals, actual outcomes; fit GoalCalibrator.
+      Pass 2 — recompute goal_probs from GoalCalibrator-scaled λ/μ; fit GoalMarketCalibrator.
+    This aligns GoalMarketCalibrator training with the actual production pipeline where
+    goal_probs are derived from GoalCalibrator-adjusted λ/μ.
+
+    Time-decay weights (half-life = decay_halflife_days) give recent matches higher
+    influence, capturing current-season scoring patterns over historical averages.
 
     Returns (None, None, None) if < 80 out-of-sample samples collected.
     """
@@ -323,9 +330,11 @@ def build_calibrators(
 
     completed_sorted = sorted(completed, key=lambda f: f.date)
 
+    # Pass 1: collect samples
     samples_ph, samples_pd, samples_pa, actuals = [], [], [], []
     predicted_totals, actual_totals = [], []
-    gm_preds: dict = {m: [] for m in GOAL_MARKETS}
+    lam_mu_rho: list = []   # stored for pass 2
+    sample_dates: list = []
     gm_actuals: dict = {m: [] for m in GOAL_MARKETS}
 
     ensemble: EnsembleDCPredictor | None = None
@@ -375,34 +384,45 @@ def build_calibrators(
         predicted_totals.append(lam + mu)
         actual_totals.append(fx.result.home_goals + fx.result.away_goals)
 
-        # Goal market actual outcomes
+        lam_mu_rho.append((lam, mu, ensemble.dc_all.rho))
+        sample_dates.append(fx.date)
+
         total = fx.result.home_goals + fx.result.away_goals
         btts = fx.result.home_goals > 0 and fx.result.away_goals > 0
-        gp = pred.goal_probs
-        gm_preds["over2_5"].append(gp.get("over2_5", 0.0))
         gm_actuals["over2_5"].append(float(total > 2))
-        gm_preds["under2_5"].append(gp.get("under2_5", 0.0))
         gm_actuals["under2_5"].append(float(total <= 2))
-        gm_preds["goals1_3"].append(gp.get("goals1_3", 0.0))
         gm_actuals["goals1_3"].append(float(1 <= total <= 3))
-        gm_preds["goals2_4"].append(gp.get("goals2_4", 0.0))
         gm_actuals["goals2_4"].append(float(2 <= total <= 4))
-        gm_preds["btts_yes"].append(gp.get("btts_yes", 0.0))
         gm_actuals["btts_yes"].append(float(btts))
-        gm_preds["btts_no"].append(gp.get("btts_no", 0.0))
         gm_actuals["btts_no"].append(float(not btts))
 
     if len(actuals) < 80:
         return None, None, None
 
+    # Time-decay weights: exp(-days_old / halflife) — recent matches get weight ~1.0
+    max_date = max(sample_dates)
+    weights = np.array([
+        np.exp(-(max_date - d).days / decay_halflife_days)
+        for d in sample_dates
+    ])
+
     prob_cal = ProbabilityCalibrator()
-    prob_cal.fit(samples_ph, samples_pd, samples_pa, actuals)
+    prob_cal.fit(samples_ph, samples_pd, samples_pa, actuals, sample_weight=weights)
 
     goal_cal = GoalCalibrator()
-    goal_cal.fit(predicted_totals, actual_totals)
+    goal_cal.fit(predicted_totals, actual_totals, sample_weight=weights)
+
+    # Pass 2: recompute goal_probs from GoalCalibrator-scaled λ/μ so GoalMarketCalibrator
+    # trains on the same inputs it will receive in production.
+    gm_preds: dict = {m: [] for m in GOAL_MARKETS}
+    for lam, mu, rho in lam_mu_rho:
+        lam_cal, mu_cal = goal_cal.transform(lam, mu)
+        tmp = predict_from_lam_mu(0, lam_cal, mu_cal, rho)
+        for m in GOAL_MARKETS:
+            gm_preds[m].append(tmp.goal_probs.get(m, 0.0))
 
     gmarket_cal = GoalMarketCalibrator()
-    gmarket_cal.fit(gm_preds, gm_actuals)
+    gmarket_cal.fit(gm_preds, gm_actuals, sample_weight=weights)
 
     return prob_cal, goal_cal, gmarket_cal
 
@@ -549,7 +569,7 @@ def main():
                 try:
                     meta = json.loads(meta_path.read_text())
                     new_matches = n_completed - meta.get("n_completed", 0)
-                    if new_matches < 50:
+                    if new_matches < 50 and meta.get("version") == CALIBRATOR_VERSION:
                         prob_cal    = joblib.load(hda_path)
                         goal_cal    = joblib.load(goal_path)
                         gmarket_cal = joblib.load(gmarket_path)
@@ -565,7 +585,7 @@ def main():
                     joblib.dump(goal_cal, goal_path)
                     if gmarket_cal:
                         joblib.dump(gmarket_cal, gmarket_path)
-                    meta_path.write_text(json.dumps({"n_completed": n_completed}))
+                    meta_path.write_text(json.dumps({"n_completed": n_completed, "version": CALIBRATOR_VERSION}))
                     biases_str = " | ".join(
                         f"{m}:{b:+.3f}" for m, b in (gmarket_cal.biases if gmarket_cal else {}).items()
                     )
@@ -635,18 +655,23 @@ def main():
                     )
                     print(f"    Injuries: {', '.join(inj_names)} | λ {lam_orig:.2f}→{lam_adj:.2f} μ {mu_orig:.2f}→{mu_adj:.2f}")
 
-                # Goal calibration: scale λ/μ for expected_goals display in DB
+                # Goal calibration: scale λ/μ to match empirical goal distribution
                 lam_final = pred.expected_goals_home
                 mu_final = pred.expected_goals_away
                 if goal_cal is not None:
                     lam_final, mu_final = goal_cal.transform(lam_final, mu_final)
-
-                # Goal market calibration: per-market isotonic regression
-                # Trained on ensemble predictions → directly fixes per-market biases
-                if gmarket_cal is not None:
-                    gp = gmarket_cal.transform(pred.goal_probs)
+                    # Recompute goal_probs from calibrated λ/μ — aligns with GoalMarketCalibrator
+                    # training (pass 2 in build_calibrators uses the same calibrated inputs).
+                    pred_recal = predict_from_lam_mu(fx.id, lam_final, mu_final, model.dc_all.rho)
+                    base_goal_probs = pred_recal.goal_probs
                 else:
-                    gp = pred.goal_probs
+                    base_goal_probs = pred.goal_probs
+
+                # Goal market calibration: per-market isotonic regression on top of scaled probs
+                if gmarket_cal is not None:
+                    gp = gmarket_cal.transform(base_goal_probs)
+                else:
+                    gp = base_goal_probs
 
                 # H/D/A isotonic calibration (independent of goal calibration)
                 if prob_cal is not None:

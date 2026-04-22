@@ -6,15 +6,17 @@ GoalCalibrator        — isotonic regression on λ+μ → actual total goals.
                         Corrects the Poisson independence bias: real football
                         has negative goal correlation (teams defend more when
                         trailing) → actual totals are lower than λ+μ predicts.
-GoalMarketCalibrator  — per-market isotonic regression on goal market probs.
-                        Each market (over2_5, goals1_3, btts_yes, …) has its
-                        own independent bias — unlike GoalCalibrator which
-                        applies a single λ+μ scaling to all markets at once.
+GoalMarketCalibrator  — Platt scaling (logistic regression in logit space) per market.
+                        Smooth monotone mapping — avoids isotonic step-function collapse
+                        when input range is narrow (post-GoalCalibrator scaled probs).
+                        Each market fitted independently; complementary pairs renormalized.
 
 All are fit on out-of-sample (walk-forward) ensemble predictions to avoid overfitting.
 """
 import numpy as np
+from scipy.special import expit, logit as _logit
 from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 
 GOAL_MARKETS = ("over2_5", "under2_5", "goals1_3", "goals2_4", "btts_yes", "btts_no")
 
@@ -32,13 +34,14 @@ class GoalCalibrator:
         self.n_samples = 0
         self.mean_bias: float = 0.0  # avg(predicted) - avg(actual), positive = model overcounts
 
-    def fit(self, predicted_totals, actual_totals) -> None:
+    def fit(self, predicted_totals, actual_totals, sample_weight=None) -> None:
         x = np.array(predicted_totals, dtype=float)
         y = np.array(actual_totals, dtype=float)
-        self._ir.fit(x, y)
+        self._ir.fit(x, y, sample_weight=sample_weight)
         self._fitted = True
         self.n_samples = len(y)
-        self.mean_bias = round(float(x.mean() - y.mean()), 4)
+        w = np.array(sample_weight) if sample_weight is not None else None
+        self.mean_bias = round(float(np.average(x, weights=w) - np.average(y, weights=w)), 4)
 
     def transform(self, lam: float, mu: float) -> tuple[float, float]:
         """Scale λ/μ proportionally so λ+μ matches calibrated expected total."""
@@ -65,7 +68,7 @@ class ProbabilityCalibrator:
         self.ece_before: float = 0.0
         self.ece_after: float = 0.0
 
-    def fit(self, probs_h, probs_d, probs_a, actuals) -> None:
+    def fit(self, probs_h, probs_d, probs_a, actuals, sample_weight=None) -> None:
         """
         probs_*  : array-like of model probabilities for each outcome
         actuals  : array-like of 'H' / 'D' / 'A' strings
@@ -75,9 +78,9 @@ class ProbabilityCalibrator:
         pa = np.array(probs_a, dtype=float)
         y  = np.array(actuals)
 
-        self._ir_h.fit(ph, (y == "H").astype(float))
-        self._ir_d.fit(pd, (y == "D").astype(float))
-        self._ir_a.fit(pa, (y == "A").astype(float))
+        self._ir_h.fit(ph, (y == "H").astype(float), sample_weight=sample_weight)
+        self._ir_d.fit(pd, (y == "D").astype(float), sample_weight=sample_weight)
+        self._ir_a.fit(pa, (y == "A").astype(float), sample_weight=sample_weight)
         self._fitted = True
         self.n_samples = len(y)
 
@@ -108,45 +111,56 @@ class ProbabilityCalibrator:
 
 
 class GoalMarketCalibrator:
-    """Per-market isotonic regression calibration for goal market probabilities.
+    """Per-market Platt scaling for goal market probabilities.
 
-    Unlike GoalCalibrator (which scales λ+μ globally), calibrates each of the
-    six goal markets independently so per-market biases are corrected separately.
-    Trained on out-of-sample ensemble predictions; applied before DB insert.
+    Fits logistic regression in logit space per market:
+        logit(cal) = a * logit(pred) + b
+    Smooth monotone mapping — avoids isotonic step-function collapse when
+    input probabilities cluster in a narrow range (e.g. post-GoalCalibrator).
+    Extrapolates continuously beyond the training range.
     """
 
     def __init__(self):
-        self._irs: dict = {m: IsotonicRegression(out_of_bounds="clip") for m in GOAL_MARKETS}
+        self._lrs: dict = {}  # market -> LogisticRegression
         self._fitted_markets: set = set()
         self.n_samples: int = 0
-        self.biases: dict = {}  # market -> mean_bias (positive = model overcounts)
+        self.biases: dict = {}  # market -> weighted mean_bias before calibration
 
-    def fit(self, preds: dict, actuals: dict) -> None:
+    def fit(self, preds: dict, actuals: dict, sample_weight=None) -> None:
         """
         preds:   {market: [predicted_prob, ...]}
         actuals: {market: [0.0 / 1.0, ...]}
         """
         n = 0
+        w_arr = np.array(sample_weight) if sample_weight is not None else None
         for m in GOAL_MARKETS:
             x = np.array(preds.get(m, []), dtype=float)
             y = np.array(actuals.get(m, []), dtype=float)
             mask = ~(np.isnan(x) | np.isnan(y))
             if mask.sum() < 20:
                 continue
-            self._irs[m].fit(x[mask], y[mask])
+            w_m = w_arr[mask] if w_arr is not None else None
+            x_logit = _logit(np.clip(x[mask], 1e-6, 1 - 1e-6)).reshape(-1, 1)
+            lr = LogisticRegression(C=1e9, solver="lbfgs", max_iter=300)
+            lr.fit(x_logit, y[mask].astype(int), sample_weight=w_m)
+            self._lrs[m] = lr
             self._fitted_markets.add(m)
-            self.biases[m] = round(float(x[mask].mean() - y[mask].mean()), 4)
+            self.biases[m] = round(float(
+                np.average(x[mask], weights=w_m) - np.average(y[mask], weights=w_m)
+            ), 4)
             n = max(n, int(mask.sum()))
         self.n_samples = n
 
     def transform(self, goal_probs: dict) -> dict:
-        """Calibrate per-market. Falls back to raw prob for unfitted markets."""
+        """Calibrate per-market via Platt scaling. Falls back to raw for unfitted markets."""
         if not self._fitted_markets:
             return goal_probs
         result = dict(goal_probs)
         for m in self._fitted_markets:
             if m in goal_probs:
-                cal = float(self._irs[m].predict([goal_probs[m]])[0])
+                p = float(goal_probs[m])
+                x_logit = np.array([[_logit(np.clip(p, 1e-6, 1 - 1e-6))]])
+                cal = float(self._lrs[m].predict_proba(x_logit)[0, 1])
                 result[m] = round(max(0.0, min(1.0, cal)), 4)
         # Renormalize complementary pairs so they sum to 1
         for over, under in (("over2_5", "under2_5"), ("btts_yes", "btts_no")):
