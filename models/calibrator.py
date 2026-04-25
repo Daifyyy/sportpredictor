@@ -18,6 +18,8 @@ from scipy.special import expit, logit as _logit
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
+# IsotonicRegression is still used by GoalCalibrator and CornersCalibrator
+
 GOAL_MARKETS = ("over2_5", "under2_5", "goals1_3", "goals2_4", "btts_yes", "btts_no")
 
 
@@ -58,36 +60,48 @@ class GoalCalibrator:
 
 
 class ProbabilityCalibrator:
+    """Platt scaling (logistic regression in logit space) per outcome.
+
+    Replaces isotonic regression to avoid step-function collapse: isotonic maps
+    a range of raw probabilities to a single constant output (plateau), causing
+    different fixtures to receive identical calibrated values. Logistic regression
+    gives a smooth, strictly monotone mapping that extrapolates continuously.
+    """
 
     def __init__(self):
-        self._ir_h = IsotonicRegression(out_of_bounds="clip")
-        self._ir_d = IsotonicRegression(out_of_bounds="clip")
-        self._ir_a = IsotonicRegression(out_of_bounds="clip")
+        self._lr_h = LogisticRegression(C=1e9, solver="lbfgs", max_iter=300)
+        self._lr_d = LogisticRegression(C=1e9, solver="lbfgs", max_iter=300)
+        self._lr_a = LogisticRegression(C=1e9, solver="lbfgs", max_iter=300)
         self._fitted = False
         self.n_samples = 0
         self.ece_before: float = 0.0
         self.ece_after: float = 0.0
 
+    def _fit_one(self, lr: LogisticRegression, probs: np.ndarray, labels: np.ndarray, w) -> None:
+        x = _logit(np.clip(probs, 1e-6, 1 - 1e-6)).reshape(-1, 1)
+        lr.fit(x, labels, sample_weight=w)
+
+    def _predict_one(self, lr: LogisticRegression, probs: np.ndarray) -> np.ndarray:
+        x = _logit(np.clip(probs, 1e-6, 1 - 1e-6)).reshape(-1, 1)
+        return lr.predict_proba(x)[:, 1]
+
     def fit(self, probs_h, probs_d, probs_a, actuals, sample_weight=None) -> None:
-        """
-        probs_*  : array-like of model probabilities for each outcome
-        actuals  : array-like of 'H' / 'D' / 'A' strings
-        """
         ph = np.array(probs_h, dtype=float)
         pd = np.array(probs_d, dtype=float)
         pa = np.array(probs_a, dtype=float)
         y  = np.array(actuals)
+        w  = np.array(sample_weight) if sample_weight is not None else None
 
-        self._ir_h.fit(ph, (y == "H").astype(float), sample_weight=sample_weight)
-        self._ir_d.fit(pd, (y == "D").astype(float), sample_weight=sample_weight)
-        self._ir_a.fit(pa, (y == "A").astype(float), sample_weight=sample_weight)
+        self._fit_one(self._lr_h, ph, (y == "H").astype(int), w)
+        self._fit_one(self._lr_d, pd, (y == "D").astype(int), w)
+        self._fit_one(self._lr_a, pa, (y == "A").astype(int), w)
         self._fitted = True
         self.n_samples = len(y)
 
         self.ece_before = _ece(ph, pd, pa, y)
-        cal_h = self._ir_h.predict(ph)
-        cal_d = self._ir_d.predict(pd)
-        cal_a = self._ir_a.predict(pa)
+        cal_h = self._predict_one(self._lr_h, ph)
+        cal_d = self._predict_one(self._lr_d, pd)
+        cal_a = self._predict_one(self._lr_a, pa)
         totals = cal_h + cal_d + cal_a
         safe   = totals > 0
         cal_h[safe] /= totals[safe]
@@ -96,13 +110,13 @@ class ProbabilityCalibrator:
         self.ece_after = _ece(cal_h, cal_d, cal_a, y)
 
     def transform(self, prob_h: float, prob_d: float, prob_a: float) -> tuple[float, float, float]:
-        """Apply calibration + renormalize. Falls back to raw probs if not fitted."""
+        """Apply Platt scaling + renormalize. Falls back to raw probs if not fitted."""
         if not self._fitted:
             return prob_h, prob_d, prob_a
 
-        c_h = float(self._ir_h.predict([prob_h])[0])
-        c_d = float(self._ir_d.predict([prob_d])[0])
-        c_a = float(self._ir_a.predict([prob_a])[0])
+        c_h = float(self._predict_one(self._lr_h, np.array([prob_h]))[0])
+        c_d = float(self._predict_one(self._lr_d, np.array([prob_d]))[0])
+        c_a = float(self._predict_one(self._lr_a, np.array([prob_a]))[0])
 
         total = c_h + c_d + c_a
         if total <= 0:

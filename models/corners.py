@@ -44,6 +44,7 @@ class CornersPredictor:
 
     def __init__(self, home_advantage: float = 0.05):
         self.home_advantage = home_advantage
+        self.xi: float = 0.0
         self.attack: Dict[int, float] = {}
         self.defence: Dict[int, float] = {}
         self._fitted = False
@@ -69,22 +70,30 @@ class CornersPredictor:
         hc = np.array([f.home_stats.corners for f in completed], dtype=np.int32)
         ac = np.array([f.away_stats.corners for f in completed], dtype=np.int32)
 
+        T = max(f.date for f in completed)
+        days_arr = np.array([(T - f.date).days for f in completed], dtype=np.float64)
+
         def neg_ll(params):
             att = params[:n]
             dfc = params[n:2 * n]
             ha  = params[2 * n]
+            xi  = params[2 * n + 1]
+            w   = np.exp(-xi * days_arr)
             lam = np.exp(att[hi] - dfc[ai] + ha)
             mu  = np.exp(att[ai] - dfc[hi])
-            return -(poisson.logpmf(hc, lam).sum() + poisson.logpmf(ac, mu).sum())
+            return -((w * poisson.logpmf(hc, lam)).sum() + (w * poisson.logpmf(ac, mu)).sum())
 
-        x0 = np.zeros(2 * n + 1)
-        x0[2 * n] = self.home_advantage
-        res = minimize(neg_ll, x0, method="L-BFGS-B")
+        x0 = np.zeros(2 * n + 2)
+        x0[2 * n]     = self.home_advantage
+        x0[2 * n + 1] = 0.003  # initial xi
+        bounds = [(None, None)] * (2 * n) + [(None, None)] + [(0.0, 0.02)]
+        res = minimize(neg_ll, x0, method="L-BFGS-B", bounds=bounds)
 
         for i, tid in enumerate(teams):
             self.attack[tid]  = res.x[i]
             self.defence[tid] = res.x[n + i]
         self.home_advantage = res.x[2 * n]
+        self.xi             = res.x[2 * n + 1]
         self._fitted = True
 
     def _lam_mu(self, h_id: int, a_id: int) -> tuple[float, float]:

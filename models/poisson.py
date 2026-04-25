@@ -5,6 +5,8 @@ from typing import List, Dict
 from data.models import Fixture, Prediction
 from models.base import BasePredictor
 
+_LAMBDA_HOME_REG = 0.1  # L2 penalty on per-team home_adv_delta; shrinks toward global mean
+
 
 class DixonColesPredictor(BasePredictor):
     """
@@ -19,8 +21,10 @@ class DixonColesPredictor(BasePredictor):
     def __init__(self, home_advantage: float = 0.1):
         self.home_advantage = home_advantage
         self.rho: float = -0.13
+        self.xi: float = 0.0
         self.attack: Dict[int, float] = {}
         self.defence: Dict[int, float] = {}
+        self.home_adv_delta: Dict[int, float] = {}
         self._fitted = False
 
     @staticmethod
@@ -37,6 +41,7 @@ class DixonColesPredictor(BasePredictor):
         fixtures: List[Fixture],
         attack_prior: Dict[int, float] = None,
         defence_prior: Dict[int, float] = None,
+        xi_fixed: float | None = None,
     ) -> None:
         completed = [f for f in fixtures if f.result is not None]
         teams = list({f.home_team.id for f in completed} | {f.away_team.id for f in completed})
@@ -55,16 +60,24 @@ class DixonColesPredictor(BasePredictor):
         m10 = (hg_arr == 1) & (ag_arr == 0)
         m11 = (hg_arr == 1) & (ag_arr == 1)
 
+        # Days before training cutoff — precomputed for time-decay weight exp(-xi*days)
+        T = max(f.date for f in completed)
+        days_arr = np.array([(T - f.date).days for f in completed], dtype=np.float64)
+
         def log_likelihood(params):
             attack  = params[:n]
             defence = params[n:2*n]
             home    = params[2*n]
             rho     = params[2*n + 1]
+            xi      = params[2*n + 2]
+            h_delta = params[2*n + 3 : 3*n + 3]  # per-team home advantage delta
 
-            lam = np.exp(attack[hi_arr] - defence[ai_arr] + home)
+            w = np.exp(-xi * days_arr)
+
+            lam = np.exp(attack[hi_arr] - defence[ai_arr] + home + h_delta[hi_arr])
             mu  = np.exp(attack[ai_arr] - defence[hi_arr])
 
-            ll = -(poisson.logpmf(hg_arr, lam).sum() + poisson.logpmf(ag_arr, mu).sum())
+            ll = -((w * poisson.logpmf(hg_arr, lam)).sum() + (w * poisson.logpmf(ag_arr, mu)).sum())
 
             tau = np.ones(len(completed))
             tau[m00] = 1 - lam[m00] * mu[m00] * rho
@@ -73,12 +86,15 @@ class DixonColesPredictor(BasePredictor):
             tau[m11] = 1 - rho
             if np.any(tau <= 0):
                 return 1e15
-            ll -= np.log(tau).sum()
+            ll -= (w * np.log(tau)).sum()
+
+            # L2 regularization: shrinks per-team deltas toward 0 (global mean)
+            ll += _LAMBDA_HOME_REG * np.sum(h_delta ** 2)
             return ll
 
         # Starting point: use domestic league priors where available, zeros otherwise.
         # Teams with few cup matches inherit domestic strength; cup data only fine-tunes.
-        x0 = np.zeros(2 * n + 2)
+        x0 = np.zeros(3 * n + 3)
         if attack_prior:
             for i, team_id in enumerate(teams):
                 if team_id in attack_prior:
@@ -89,14 +105,20 @@ class DixonColesPredictor(BasePredictor):
                     x0[n + i] = defence_prior[team_id]
         x0[2 * n]     = self.home_advantage
         x0[2 * n + 1] = -0.13
-        bounds = [(None, None)] * (2 * n + 1) + [(-0.99, 0.99)]
+        xi_init = xi_fixed if xi_fixed is not None else 0.003
+        xi_bound = (xi_fixed, xi_fixed) if xi_fixed is not None else (0.0, 0.02)
+        x0[2 * n + 2] = xi_init
+        # h_delta initialized to 0 (no per-team deviation at start)
+        bounds = [(None, None)] * (2 * n + 1) + [(-0.99, 0.99)] + [xi_bound] + [(None, None)] * n
         res = minimize(log_likelihood, x0, method='L-BFGS-B', bounds=bounds)
 
         for i, team_id in enumerate(teams):
-            self.attack[team_id]  = res.x[i]
-            self.defence[team_id] = res.x[n + i]
+            self.attack[team_id]        = res.x[i]
+            self.defence[team_id]       = res.x[n + i]
+            self.home_adv_delta[team_id] = float(res.x[2*n + 3 + i])
         self.home_advantage = res.x[2 * n]
         self.rho            = res.x[2 * n + 1]
+        self.xi             = res.x[2 * n + 2]
         self._fitted = True
 
     def predict(self, fixture: Fixture, history: List[Fixture] = None) -> Prediction:
@@ -105,7 +127,7 @@ class DixonColesPredictor(BasePredictor):
 
         h_id = fixture.home_team.id
         a_id = fixture.away_team.id
-        lam = np.exp(self.attack.get(h_id, 0) - self.defence.get(a_id, 0) + self.home_advantage)
+        lam = np.exp(self.attack.get(h_id, 0) - self.defence.get(a_id, 0) + self.home_advantage + self.home_adv_delta.get(h_id, 0.0))
         mu  = np.exp(self.attack.get(a_id, 0) - self.defence.get(h_id, 0))
 
         max_goals = 10

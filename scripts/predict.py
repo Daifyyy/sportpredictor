@@ -48,7 +48,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models/saved")
-CALIBRATOR_VERSION = "v3"  # bump when calibration pipeline changes to invalidate disk cache
+CALIBRATOR_VERSION = "v6"  # bump when calibration pipeline changes to invalidate disk cache
 
 
 def predict_from_lam_mu(fixture_id: int, lam: float, mu: float, rho: float) -> Prediction:
@@ -116,35 +116,42 @@ def train_ensemble(
         covered = sum(1 for f in completed if f.home_team.id in attack_prior or f.away_team.id in attack_prior)
         print(f"  Using domestic prior — {len(attack_prior)} teams in prior, {covered}/{len(completed)*2} appearances covered")
 
-    # dc_all
+    # dc_all: stable history baseline — xi fixed to 0 so all seasons contribute equally.
+    # Recency is handled by dc_recent; mixing time-decay into dc_all makes it redundant
+    # with dc_recent and causes optimize_weights to collapse to [1, 0, 0].
     dc_all = DixonColesPredictor()
-    dc_all.train(completed, attack_prior=attack_prior, defence_prior=defence_prior)
+    dc_all.train(completed, attack_prior=attack_prior, defence_prior=defence_prior, xi_fixed=0.0)
     dc_all.save(MODELS_DIR / f"dc_all_{cfg.name.lower().replace(' ', '_')}.joblib")
-    print(f"  dc_all trained on {len(completed)} matches")
+    print(f"  dc_all trained on {len(completed)} matches  xi=0 (fixed, history baseline)")
 
-    # dc_season
+    # dc_season: current season only — xi fixed to 0.003 (half-life ~231 days).
+    # Keeps full season relevant with mild recency bias; free xi hits 0.02 bound and
+    # makes dc_season behave like dc_recent, causing optimizer to give it 0 weight.
     season_fixtures = [f for f in completed if f.season == cfg.season]
     if len(season_fixtures) >= 30:
         dc_season = DixonColesPredictor()
-        dc_season.train(season_fixtures, attack_prior=attack_prior, defence_prior=defence_prior)
+        dc_season.train(season_fixtures, attack_prior=attack_prior, defence_prior=defence_prior, xi_fixed=0.003)
         dc_season.save(MODELS_DIR / f"dc_season_{cfg.name.lower().replace(' ', '_')}.joblib")
-        print(f"  dc_season trained on {len(season_fixtures)} matches")
+        print(f"  dc_season trained on {len(season_fixtures)} matches  xi=0.003 (fixed, half-life ~231d)")
     else:
         dc_season = dc_all
         print(f"  dc_season fallback to dc_all ({len(season_fixtures)} season matches)")
 
-    # dc_recent (last 60 days)
+    # dc_recent (last 60 days): already date-filtered — xi fixed to 0, no extra decay needed
     cutoff = max(f.date for f in completed) - timedelta(days=60)
     recent_fixtures = [f for f in completed if f.date >= cutoff]
     if len(recent_fixtures) >= 30:
         dc_recent = DixonColesPredictor()
-        dc_recent.train(recent_fixtures, attack_prior=attack_prior, defence_prior=defence_prior)
-        print(f"  dc_recent trained on {len(recent_fixtures)} matches (last 60 days)")
+        dc_recent.train(recent_fixtures, attack_prior=attack_prior, defence_prior=defence_prior, xi_fixed=0.0)
+        print(f"  dc_recent trained on {len(recent_fixtures)} matches (last 60 days)  xi=0 (fixed)")
     else:
         dc_recent = None
         print(f"  dc_recent skipped ({len(recent_fixtures)} recent matches)")
 
-    return EnsembleDCPredictor(dc_all, dc_season, dc_recent, league_key=league_key)
+    ensemble = EnsembleDCPredictor(dc_all, dc_season, dc_recent, league_key=league_key)
+    ensemble.optimize_weights(completed, xi_fixed_all=0.0, xi_fixed_season=0.003, xi_fixed_recent=0.0)
+    print(f"  Weights: dc_all={ensemble._w_all:.2f} dc_season={ensemble._w_season:.2f} dc_recent={ensemble._w_recent:.2f}")
+    return ensemble
 
 
 def archive_resolved_fixtures(db, fetcher: "FootballFetcher", league_key: str, completed) -> int:
@@ -346,12 +353,12 @@ def build_calibrators(
             cur_date = completed_sorted[i].date
 
             dc_all = DixonColesPredictor()
-            dc_all.train(train_slice)
+            dc_all.train(train_slice, xi_fixed=0.0)
 
             season_slice = [f for f in train_slice if f.season == cur_season]
             if len(season_slice) >= 30:
                 dc_season = DixonColesPredictor()
-                dc_season.train(season_slice)
+                dc_season.train(season_slice, xi_fixed=0.003)
             else:
                 dc_season = dc_all
 
@@ -359,7 +366,7 @@ def build_calibrators(
             recent_slice = [f for f in train_slice if f.date >= cutoff]
             if len(recent_slice) >= 30:
                 dc_recent = DixonColesPredictor()
-                dc_recent.train(recent_slice)
+                dc_recent.train(recent_slice, xi_fixed=0.0)
             else:
                 dc_recent = None
 
@@ -465,13 +472,17 @@ def build_corners_calibrator(
     return cal
 
 
-def main():
+def main(only_league: str | None = None):
     Base.metadata.create_all(engine)
     client = APIClient(settings)
     fetcher = FootballFetcher(client, settings)
     db = SessionLocal()
 
     injury_adjuster = InjuryAdjuster()
+
+    if only_league and only_league not in settings.leagues:
+        print(f"Unknown league key: {only_league!r}. Valid keys: {list(settings.leagues)}")
+        return
 
     try:
         # Phase 1: train domestic leagues, collect attack/defence parameters as cup priors
@@ -483,6 +494,8 @@ def main():
 
         for league_key, cfg in settings.leagues.items():
             if league_key in CUP_LEAGUES:
+                continue
+            if only_league and league_key != only_league:
                 continue
             print(f"\n[{cfg.name}]")
             history = fetcher.get_fixtures(cfg, status="FT")
@@ -538,6 +551,8 @@ def main():
         cup_results: dict = {}
         for league_key, cfg in settings.leagues.items():
             if league_key not in CUP_LEAGUES:
+                continue
+            if only_league and league_key != only_league:
                 continue
             print(f"\n[{cfg.name}]")
             history = fetcher.get_fixtures(cfg, status="FT")
@@ -660,20 +675,18 @@ def main():
                 mu_final = pred.expected_goals_away
                 if goal_cal is not None:
                     lam_final, mu_final = goal_cal.transform(lam_final, mu_final)
-                    # Recompute goal_probs from calibrated λ/μ — aligns with GoalMarketCalibrator
-                    # training (pass 2 in build_calibrators uses the same calibrated inputs).
                     pred_recal = predict_from_lam_mu(fx.id, lam_final, mu_final, model.dc_all.rho)
                     base_goal_probs = pred_recal.goal_probs
                 else:
                     base_goal_probs = pred.goal_probs
 
-                # Goal market calibration: per-market isotonic regression on top of scaled probs
+                # Goal market calibration: per-market Platt scaling
                 if gmarket_cal is not None:
                     gp = gmarket_cal.transform(base_goal_probs)
                 else:
                     gp = base_goal_probs
 
-                # H/D/A isotonic calibration (independent of goal calibration)
+                # H/D/A Platt scaling calibration
                 if prob_cal is not None:
                     ph, pd_val, pa = prob_cal.transform(pred.prob_home, pred.prob_draw, pred.prob_away)
                 else:
@@ -736,4 +749,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--league", help="Run only for this league key (e.g. premier_league)")
+    args = parser.parse_args()
+    main(only_league=args.league)
