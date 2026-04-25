@@ -449,11 +449,157 @@ _POS_CZ = {
 _STATUS_ICON = {"Missing": "🔴", "Questionable": "🟡"}
 
 
+def _render_injury_waterfall(
+    home_name: str, away_name: str,
+    home_injuries: list, away_injuries: list,
+    home_goals: int, away_goals: int,
+    home_goals_against: int, away_goals_against: int,
+    lam_final: float, mu_final: float,
+) -> None:
+    """Waterfall chart: λ/μ baseline → per-player injury impacts → final xG.
+
+    lam_final / mu_final are the post-injury, post-calibration expected goals from DB.
+    We invert the injury adjustment factors to recover the approximate baseline
+    (what the calibrated xG would have been without any injuries).
+    """
+    import plotly.graph_objects as go
+    from data.models import PlayerInjury
+
+    home_atk: list = []  # (name, a) — reduces λ (home attack missing)
+    home_def: list = []  # (name, d) — increases μ (home defense weakened)
+    away_atk: list = []  # (name, a) — reduces μ (away attack missing)
+    away_def: list = []  # (name, d) — increases λ (away defense weakened)
+
+    for inj in home_injuries:
+        a, d = _injury_adjuster.player_impact(PlayerInjury(**inj), home_goals, home_goals_against)
+        if a >= 0.005:
+            home_atk.append((inj["player_name"], a))
+        if d >= 0.005:
+            home_def.append((inj["player_name"], d))
+
+    for inj in away_injuries:
+        a, d = _injury_adjuster.player_impact(PlayerInjury(**inj), away_goals, away_goals_against)
+        if a >= 0.005:
+            away_atk.append((inj["player_name"], a))
+        if d >= 0.005:
+            away_def.append((inj["player_name"], d))
+
+    has_lam = bool(home_atk or away_def)
+    has_mu  = bool(away_atk or home_def)
+    if not has_lam and not has_mu:
+        return
+
+    # Capped totals matching InjuryAdjuster.adjust() logic
+    total_home_atk = min(sum(a for _, a in home_atk), 0.25) if home_atk else 0.0
+    total_away_def = min(sum(d for _, d in away_def), 0.20) if away_def else 0.0
+    total_away_atk = min(sum(a for _, a in away_atk), 0.25) if away_atk else 0.0
+    total_home_def = min(sum(d for _, d in home_def), 0.20) if home_def else 0.0
+
+    # Recover approximate baseline by inverting the adjustment
+    # lam_final = lam_base * (1 - total_home_atk) * (1 + total_away_def)
+    scale_lam = (1 - total_home_atk) * (1 + total_away_def)
+    scale_mu  = (1 - total_away_atk) * (1 + total_home_def)
+    lam_base = lam_final / scale_lam if scale_lam > 0.01 else lam_final
+    mu_base  = mu_final  / scale_mu  if scale_mu  > 0.01 else mu_final
+
+    def build_waterfall(base, final, atk_players, def_players, total_atk, total_def):
+        """Decompose injury adjustment into per-player proportional contributions."""
+        labels   = ["Základ"]
+        values   = [round(base, 3)]
+        measures = ["absolute"]
+
+        # Attack phase: each attacker's share of total attack reduction on base
+        if atk_players:
+            raw_sum = sum(a for _, a in atk_players) or 1.0
+            total_delta = base * total_atk
+            for name, a in sorted(atk_players, key=lambda x: x[1], reverse=True):
+                delta = -round((a / raw_sum) * total_delta, 4)
+                if abs(delta) >= 0.003:
+                    labels.append(name[:18])
+                    values.append(delta)
+                    measures.append("relative")
+
+        # Defense phase: each defender's share applied to post-attack base
+        if def_players:
+            lam_mid = base * (1 - total_atk)
+            raw_sum = sum(d for _, d in def_players) or 1.0
+            total_delta = lam_mid * total_def
+            for name, d in sorted(def_players, key=lambda x: x[1], reverse=True):
+                delta = round((d / raw_sum) * total_delta, 4)
+                if abs(delta) >= 0.003:
+                    labels.append(f"↑ {name[:16]}")
+                    values.append(delta)
+                    measures.append("relative")
+
+        labels.append("Výsledek")
+        values.append(round(final, 3))
+        measures.append("total")
+        return labels, values, measures
+
+    def make_fig(labels, values, measures, title):
+        text = []
+        for v, m in zip(values, measures):
+            if m == "relative":
+                text.append(f"{v:+.3f}")
+            else:
+                text.append(f"{v:.2f}")
+
+        fig = go.Figure(go.Waterfall(
+            orientation="h",
+            measure=measures,
+            y=labels,
+            x=values,
+            text=text,
+            textposition="outside",
+            connector={"line": {"color": "rgba(120,120,120,0.4)", "width": 1}},
+            decreasing={"marker": {"color": "#C0392B"}},
+            increasing={"marker": {"color": "#27AE60"}},
+            totals={"marker": {"color": "#2980B9"}},
+        ))
+        n = len(labels)
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=13)),
+            height=max(160, 55 + 36 * n),
+            margin=dict(l=5, r=55, t=38, b=10),
+            showlegend=False,
+            xaxis=dict(tickformat=".2f", title="xG", zeroline=True,
+                       zerolinecolor="rgba(120,120,120,0.5)"),
+            yaxis=dict(autorange="reversed"),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+        )
+        return fig
+
+    st.caption(
+        f"📊 Vliv zranění · základ λ={lam_base:.2f} / μ={mu_base:.2f}"
+        f" → po úpravě λ={lam_final:.2f} / μ={mu_final:.2f}"
+    )
+
+    charts = []
+    if has_lam:
+        labels_l, vals_l, meas_l = build_waterfall(
+            lam_base, lam_final, home_atk, away_def, total_home_atk, total_away_def
+        )
+        charts.append((labels_l, vals_l, meas_l, f"λ — {home_name} (útok)"))
+    if has_mu:
+        labels_m, vals_m, meas_m = build_waterfall(
+            mu_base, mu_final, away_atk, home_def, total_away_atk, total_home_def
+        )
+        charts.append((labels_m, vals_m, meas_m, f"μ — {away_name} (útok)"))
+
+    cols = st.columns(len(charts))
+    for col, (labels, vals, meas, title) in zip(cols, charts):
+        with col:
+            st.plotly_chart(make_fig(labels, vals, meas, title), use_container_width=True)
+
+
 def render_injuries(
     home_name: str, away_name: str,
     home_injuries: list, away_injuries: list,
     home_goals: int, away_goals: int,
     home_goals_against: int = 50, away_goals_against: int = 50,
+    lam_final: float | None = None,
+    mu_final: float | None = None,
 ) -> None:
     """Render injured/suspended player lists with per-player impact estimate."""
     if not home_injuries and not away_injuries:
@@ -461,19 +607,19 @@ def render_injuries(
 
     st.caption("🚑 Zranění a absence")
 
-    def fmt_player(inj: dict, team_goals: int, team_goals_against: int) -> str:
+    def fmt_player(inj: dict, team_goals: int, team_goals_against: int, is_home: bool) -> str:
         from data.models import PlayerInjury
         icon = _STATUS_ICON.get(inj["status"], "🔴")
         pos  = _POS_CZ.get(inj["position"], inj["position"])
         atk, dfn = _injury_adjuster.player_impact(PlayerInjury(**inj), team_goals, team_goals_against)
-        impact = atk or dfn
 
         if inj["position"] in ("Attacker", "Midfielder"):
             stat_str = f"{inj['goals']}G {inj['assists']}A"
+            impact_str = f" · **−{atk*100:.0f}% λ**" if atk >= 0.01 else ""
         else:
             stat_str = f"{inj['minutes']} min"
+            impact_str = f" · **+{dfn*100:.0f}% opp. λ**" if dfn >= 0.01 else ""
 
-        impact_str = f" · **−{impact*100:.0f}% λ**" if impact >= 0.01 else ""
         status_str = "Chybí" if inj["status"] == "Missing" else "Pochybný"
         return f"{icon} {inj['player_name']} *({pos})* · {stat_str}{impact_str} · {status_str}"
 
@@ -482,16 +628,25 @@ def render_injuries(
         st.markdown(f"**🏠 {home_name}**")
         if home_injuries:
             for inj in home_injuries:
-                st.markdown(fmt_player(inj, home_goals, home_goals_against))
+                st.markdown(fmt_player(inj, home_goals, home_goals_against, is_home=True))
         else:
             st.caption("Žádná hlášená zranění")
     with col_a:
         st.markdown(f"**✈️ {away_name}**")
         if away_injuries:
             for inj in away_injuries:
-                st.markdown(fmt_player(inj, away_goals, away_goals_against))
+                st.markdown(fmt_player(inj, away_goals, away_goals_against, is_home=False))
         else:
             st.caption("Žádná hlášená zranění")
+
+    if lam_final and mu_final:
+        _render_injury_waterfall(
+            home_name, away_name,
+            home_injuries, away_injuries,
+            home_goals, away_goals,
+            home_goals_against, away_goals_against,
+            lam_final, mu_final,
+        )
 
 
 def render_referee(feats: dict) -> None:
@@ -1228,6 +1383,8 @@ with tab_pred:
                     inj_data.get("away_goals", 50),
                     inj_data.get("home_goals_against", 50),
                     inj_data.get("away_goals_against", 50),
+                    lam_final=fx.get("expected_goals_home"),
+                    mu_final=fx.get("expected_goals_away"),
                 )
 
                 render_lineups(
