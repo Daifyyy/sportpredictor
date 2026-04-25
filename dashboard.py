@@ -440,6 +440,88 @@ def render_bet_validation(fx_data: dict, feats: dict) -> None:
         )
 
 
+def render_corners_validation(fx_data: dict, feats: dict) -> None:
+    """Show key signals for corners over/under bets — analogous to render_bet_validation."""
+    lam = fx_data.get("expected_corners_home")
+    mu  = fx_data.get("expected_corners_away")
+    if lam is None or mu is None:
+        return
+
+    total = lam + mu
+    home_avg   = feats.get("home_avg_corners")
+    away_avg   = feats.get("away_avg_corners")
+    h_shots    = feats.get("home_avg_total_shots")
+    a_shots    = feats.get("away_avg_total_shots")
+    tot_shots  = (h_shots + a_shots) if (h_shots is not None and a_shots is not None) else None
+
+    LINES = [8.5, 9.5, 10.5, 11.5]
+
+    # Pick best over and best under market (≥ 0.50 prob)
+    best_over  = max(
+        ((line, fx_data.get(f"corners_over{str(line).replace('.', '_')}")) for line in LINES),
+        key=lambda t: t[1] or 0,
+    )
+    best_under = max(
+        ((line, fx_data.get(f"corners_under{str(line).replace('.', '_')}")) for line in LINES),
+        key=lambda t: t[1] or 0,
+    )
+
+    sections = []
+
+    for direction, (line, prob) in [("over", best_over), ("under", best_under)]:
+        if prob is None or prob < 0.50:
+            continue
+        half = line / 2.0
+        if direction == "over":
+            buf = total - line
+            m_icon = "🟢" if buf >= 1.5 else ("🟡" if buf >= 0.5 else "🔴")
+            h_icon = ("🟢" if home_avg >= half + 0.5 else ("🟡" if home_avg >= half - 0.5 else "🔴")) if home_avg is not None else "⚪"
+            a_icon = ("🟢" if away_avg >= half + 0.5 else ("🟡" if away_avg >= half - 0.5 else "🔴")) if away_avg is not None else "⚪"
+            s_icon = ("🟢" if tot_shots >= 28 else ("🟡" if tot_shots >= 23 else "🔴")) if tot_shots is not None else "⚪"
+        else:
+            buf = line - total
+            m_icon = "🟢" if buf >= 1.5 else ("🟡" if buf >= 0.5 else "🔴")
+            h_icon = ("🟢" if home_avg <= half - 0.5 else ("🟡" if home_avg <= half + 0.5 else "🔴")) if home_avg is not None else "⚪"
+            a_icon = ("🟢" if away_avg <= half - 0.5 else ("🟡" if away_avg <= half + 0.5 else "🔴")) if away_avg is not None else "⚪"
+            s_icon = ("🟢" if tot_shots <= 19 else ("🟡" if tot_shots <= 23 else "🔴")) if tot_shots is not None else "⚪"
+
+        label = "Over" if direction == "over" else "Under"
+        signals = [
+            ("λ+μ (model Σ rohů)",          f"{total:.1f}",                                    m_icon),
+            ("Domácí avg rohů (posl. 5)",   f"{home_avg:.1f}" if home_avg is not None else "—", h_icon),
+            ("Hosté avg rohů (posl. 5)",    f"{away_avg:.1f}" if away_avg is not None else "—", a_icon),
+            ("Celkové střely/z (D+H)",      f"{tot_shots:.1f}" if tot_shots is not None else "—", s_icon),
+        ]
+        sections.append((f"Rohy {label} {line}  ({prob*100:.0f}%)", signals))
+
+    if not sections:
+        return
+
+    st.caption("🔄 Validace rohů")
+    for title, signals in sections:
+        green     = sum(1 for *_, icon in signals if icon == "🟢")
+        available = sum(1 for *_, icon in signals if icon != "⚪")
+        color = "#4ade80" if green >= 3 else ("#facc15" if green >= 2 else "#f87171")
+        avail_label = f"{green}/{available}" if available < 4 else f"{green}/4"
+        st.markdown(
+            f'<div style="margin:6px 0 2px;font-size:13px;font-weight:600;color:{color}">'
+            f'{title} — {avail_label} signálů zelených</div>',
+            unsafe_allow_html=True,
+        )
+        rows_html = "".join(
+            f'<tr>'
+            f'<td style="padding:2px 6px;font-size:14px">{icon}</td>'
+            f'<td style="padding:2px 8px;color:#aaa;font-size:12px">{name}</td>'
+            f'<td style="padding:2px 8px;color:#e2e8f0;font-size:12px;font-weight:600;text-align:right">{val}</td>'
+            f'</tr>'
+            for name, val, icon in signals
+        )
+        st.markdown(
+            f'<table style="width:100%;border-collapse:collapse;margin-bottom:4px">{rows_html}</table>',
+            unsafe_allow_html=True,
+        )
+
+
 _POS_CZ = {
     "Attacker":   "Útočník",
     "Midfielder": "Záložník",
@@ -1373,6 +1455,7 @@ with tab_pred:
                 render_prediction_stats(fx, feats)
                 render_match_detail(fx, feats, league_avg)
                 render_bet_validation(fx, feats)
+                render_corners_validation(fx, feats)
                 render_referee(feats)
 
                 render_injuries(
@@ -2165,9 +2248,19 @@ with tab_corners:
                     col2.metric("μ hosté", f"{la:.2f}")
                     col3.metric("Celkem rohů (λ+μ)", f"{total_c:.2f}")
 
-                    # Simple bar chart comparing lambda / mu
-                    bar_data = {"Domácí": lh, "Hosté": la}
-                    st.bar_chart(bar_data)
+                cr_fx_data = {
+                    "expected_corners_home": lh,
+                    "expected_corners_away": la,
+                    "corners_over8_5":    getattr(r, "corners_over8_5", None),
+                    "corners_under8_5":   getattr(r, "corners_under8_5", None),
+                    "corners_over9_5":    getattr(r, "corners_over9_5", None),
+                    "corners_under9_5":   getattr(r, "corners_under9_5", None),
+                    "corners_over10_5":   getattr(r, "corners_over10_5", None),
+                    "corners_under10_5":  getattr(r, "corners_under10_5", None),
+                    "corners_over11_5":   getattr(r, "corners_over11_5", None),
+                    "corners_under11_5":  getattr(r, "corners_under11_5", None),
+                }
+                render_corners_validation(cr_fx_data, {})
 
                 markets = {
                     "Over 8.5": getattr(r, "corners_over8_5", None),
