@@ -46,6 +46,7 @@ class FixturePrediction(Base):
     corners_under10_5 = Column(Float, nullable=True)
     corners_over11_5  = Column(Float, nullable=True)
     corners_under11_5 = Column(Float, nullable=True)
+    features_json = Column(Text, nullable=True)
 
 
 class ResolvedFixturePrediction(Base):

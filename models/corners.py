@@ -39,6 +39,9 @@ def _ou(total_lam: float, threshold: float) -> tuple[float, float]:
     return over, round(1.0 - over, 4)
 
 
+_L2_REG = 0.1  # L2 regularization on attack/defence — keeps params near 0 (league mean)
+
+
 class CornersPredictor:
     """Pure Poisson MLE for corners — no DC correction (corners avg ~10, never 0)."""
 
@@ -49,7 +52,7 @@ class CornersPredictor:
         self.defence: Dict[int, float] = {}
         self._fitted = False
 
-    def train(self, fixtures: List[Fixture]) -> None:
+    def train(self, fixtures: List[Fixture], xi_fixed: float | None = None) -> None:
         completed = [
             f for f in fixtures
             if f.result is not None
@@ -81,12 +84,15 @@ class CornersPredictor:
             w   = np.exp(-xi * days_arr)
             lam = np.exp(att[hi] - dfc[ai] + ha)
             mu  = np.exp(att[ai] - dfc[hi])
-            return -((w * poisson.logpmf(hc, lam)).sum() + (w * poisson.logpmf(ac, mu)).sum())
+            ll  = (w * poisson.logpmf(hc, lam)).sum() + (w * poisson.logpmf(ac, mu)).sum()
+            reg = _L2_REG * (np.sum(att ** 2) + np.sum(dfc ** 2))
+            return -(ll - reg)
 
         x0 = np.zeros(2 * n + 2)
         x0[2 * n]     = self.home_advantage
-        x0[2 * n + 1] = 0.003  # initial xi
-        bounds = [(None, None)] * (2 * n) + [(None, None)] + [(0.0, 0.02)]
+        x0[2 * n + 1] = xi_fixed if xi_fixed is not None else 0.003
+        xi_bound = (xi_fixed, xi_fixed) if xi_fixed is not None else (0.0, 0.02)
+        bounds = [(None, None)] * (2 * n) + [(None, None)] + [xi_bound]
         res = minimize(neg_ll, x0, method="L-BFGS-B", bounds=bounds)
 
         for i, tid in enumerate(teams):
@@ -201,7 +207,7 @@ def train_corners_ensemble(
         return None
 
     c_all = CornersPredictor()
-    c_all.train(with_corners)
+    c_all.train(with_corners, xi_fixed=0.0)   # stable baseline — all history equal weight
     if not c_all._fitted:
         return None
     c_all.save(models_dir / f"corners_all_{league_slug}.joblib")
@@ -210,7 +216,7 @@ def train_corners_ensemble(
     season_c = [f for f in with_corners if f.season == season]
     if len(season_c) >= 30:
         c_season = CornersPredictor()
-        c_season.train(season_c)
+        c_season.train(season_c, xi_fixed=0.003)  # mild recency bias within season
         if not c_season._fitted:
             c_season = c_all
         else:
@@ -224,7 +230,7 @@ def train_corners_ensemble(
     recent_c = [f for f in with_corners if f.date >= cutoff]
     if len(recent_c) >= 30:
         c_recent = CornersPredictor()
-        c_recent.train(recent_c)
+        c_recent.train(recent_c, xi_fixed=0.0)  # already date-filtered, no extra decay
         if not c_recent._fitted:
             c_recent = None
         else:

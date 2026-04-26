@@ -114,12 +114,8 @@ def get_league_features(league_key: str) -> tuple[dict, dict]:
     completed = [f for f in history if f.result is not None]
     upcoming = fetcher.get_upcoming_fixtures(cfg, next_n=10)
 
-    if len(completed) < 20 or not upcoming:
+    if len(completed) < 20:
         return {}, {}
-
-    fe = FeatureEngineer()
-    fe.precompute(completed)
-    features_by_id = {fx.id: fe.build_features(fx, completed) for fx in upcoming}
 
     n = len(completed)
     total_goals = sum(f.result.home_goals + f.result.away_goals for f in completed)
@@ -129,6 +125,13 @@ def get_league_features(league_key: str) -> tuple[dict, dict]:
         "avg_gf": round(total_goals / (2 * n), 2),
         "avg_pts": round((3 * wins + 2 * draws) / (2 * n), 2),
     }
+
+    if not upcoming:
+        return {}, league_avg
+
+    fe = FeatureEngineer()
+    fe.precompute(completed)
+    features_by_id = {fx.id: fe.build_features(fx, completed) for fx in upcoming}
     return features_by_id, league_avg
 
 
@@ -1046,6 +1049,24 @@ def compute_goal_probs(lam: float, mu: float) -> dict:
     }
 
 
+def _compute_correct_full(prediction_type: str, hs: int, as_: int,
+                          actual_corners: int | None = None) -> bool:
+    """Full resolve including Corners_ markets. Mirrors scripts/resolve.py logic."""
+    if prediction_type.startswith("Corners_"):
+        if actual_corners is None:
+            return False
+        if prediction_type == "Corners_Over8.5":   return actual_corners > 8
+        if prediction_type == "Corners_Under8.5":  return actual_corners <= 8
+        if prediction_type == "Corners_Over9.5":   return actual_corners > 9
+        if prediction_type == "Corners_Under9.5":  return actual_corners <= 9
+        if prediction_type == "Corners_Over10.5":  return actual_corners > 10
+        if prediction_type == "Corners_Under10.5": return actual_corners <= 10
+        if prediction_type == "Corners_Over11.5":  return actual_corners > 11
+        if prediction_type == "Corners_Under11.5": return actual_corners <= 11
+        return False
+    return compute_correct(prediction_type, hs, as_)
+
+
 def compute_correct(prediction_type: str, hs: int, as_: int) -> bool:
     total = hs + as_
     if prediction_type == "H":
@@ -1073,6 +1094,7 @@ def compute_correct(prediction_type: str, hs: int, as_: int) -> bool:
 def run_resolve() -> int:
     now = datetime.now(timezone.utc)
     client = APIClient(settings)
+    fetcher = get_fetcher()
     resolved = 0
     with get_db() as db:
         pending = db.query(TrackedPrediction).filter(
@@ -1095,14 +1117,33 @@ def run_resolve() -> int:
             status = raw["fixture"]["status"]["short"]
             if status == "FT" and goals.get("home") is not None:
                 results_by_id[fid] = (int(goals["home"]), int(goals["away"]))
+
+        # Fetch corners stats for fixtures that have Corners_ predictions
+        corners_by_id: dict[int, int] = {}
+        corners_fixture_ids = {
+            r.fixture_id for r in pending
+            if r.prediction_type.startswith("Corners_") and r.fixture_id in results_by_id
+        }
+        for fid in corners_fixture_ids:
+            stats = fetcher.get_fixture_statistics(fid)
+            if stats:
+                total = sum(
+                    (s.corners or 0) for s in stats.values() if s.corners is not None
+                )
+                corners_by_id[fid] = total
+
         for row in pending:
             if row.fixture_id not in results_by_id:
+                continue
+            # Skip Corners_ if we couldn't fetch actual corners (leave for GitHub Actions)
+            if row.prediction_type.startswith("Corners_") and row.fixture_id not in corners_by_id:
                 continue
             hs, as_ = results_by_id[row.fixture_id]
             row.home_score = hs
             row.away_score = as_
             row.actual_outcome = f"{hs}-{as_}"
-            row.correct = compute_correct(row.prediction_type, hs, as_)
+            actual_corners = corners_by_id.get(row.fixture_id)
+            row.correct = _compute_correct_full(row.prediction_type, hs, as_, actual_corners)
             resolved += 1
         db.commit()
     return resolved
@@ -1327,6 +1368,7 @@ with tab_pred:
                 "corners_under10_5": getattr(r, "corners_under10_5", None),
                 "corners_over11_5":  getattr(r, "corners_over11_5", None),
                 "corners_under11_5": getattr(r, "corners_under11_5", None),
+                "features_json": getattr(r, "features_json", None),
                 "league": league,
             } for r in rows]
             st.session_state["upcoming_data"] = data
@@ -1451,7 +1493,8 @@ with tab_pred:
             suffix = ("  🚑" if has_injuries else "") + ("  ⚽" if has_lineups else "")
             label = f"📅 {date_str}  ·  {home} vs {away}" + suffix
             with st.expander(label):
-                feats = features_by_id.get(fx["fixture_id"], {})
+                _fj = fx.get("features_json")
+                feats = json.loads(_fj) if _fj else features_by_id.get(fx["fixture_id"], {})
                 render_prediction_stats(fx, feats)
                 render_match_detail(fx, feats, league_avg)
                 render_bet_validation(fx, feats)

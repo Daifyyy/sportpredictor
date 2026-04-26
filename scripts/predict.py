@@ -48,7 +48,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models/saved")
-CALIBRATOR_VERSION = "v6"  # bump when calibration pipeline changes to invalidate disk cache
+CALIBRATOR_VERSION = "v6"   # bump when calibration pipeline changes to invalidate disk cache
+CORNERS_CAL_VERSION = "v2"  # bump when corners calibrator logic changes
 
 
 def predict_from_lam_mu(fixture_id: int, lam: float, mu: float, rho: float) -> Prediction:
@@ -435,10 +436,12 @@ def build_calibrators(
 
 
 def build_corners_calibrator(
-    with_corners: list, min_train: int = 80, retrain_every: int = 30
+    with_corners: list, season: int, min_train: int = 80, retrain_every: int = 30
 ) -> CornersCalibrator | None:
     """Walk-forward calibration for corners λ+μ → actual total corners.
 
+    Uses the same EnsembleCornersPredictor structure as production (c_all/c_season/c_recent
+    with xi_fixed) so the calibration corrects the same bias that the production model has.
     Returns None if < 40 out-of-sample samples collected.
     """
     if len(with_corners) < min_train + 20:
@@ -446,22 +449,46 @@ def build_corners_calibrator(
 
     sorted_c = sorted(with_corners, key=lambda f: f.date)
     predicted_totals, actual_totals = [], []
-    model: CornersPredictor | None = None
+    ensemble: EnsembleCornersPredictor | None = None
 
     for i in range(min_train, len(sorted_c)):
-        if model is None or (i - min_train) % retrain_every == 0:
-            c = CornersPredictor()
-            c.train(sorted_c[:i])
-            model = c
+        if ensemble is None or (i - min_train) % retrain_every == 0:
+            train_slice = sorted_c[:i]
 
-        if not model._fitted:
+            c_all = CornersPredictor()
+            c_all.train(train_slice, xi_fixed=0.0)
+            if not c_all._fitted:
+                ensemble = None
+                continue
+
+            season_c = [f for f in train_slice if f.season == season]
+            if len(season_c) >= 30:
+                c_season = CornersPredictor()
+                c_season.train(season_c, xi_fixed=0.003)
+                if not c_season._fitted:
+                    c_season = c_all
+            else:
+                c_season = c_all
+
+            cutoff = train_slice[-1].date - timedelta(days=60)
+            recent_c = [f for f in train_slice if f.date >= cutoff]
+            c_recent = None
+            if len(recent_c) >= 30:
+                c_recent = CornersPredictor()
+                c_recent.train(recent_c, xi_fixed=0.0)
+                if not c_recent._fitted:
+                    c_recent = None
+
+            ensemble = EnsembleCornersPredictor(c_all, c_season, c_recent)
+
+        if ensemble is None:
             continue
         fx = sorted_c[i]
-        lam, mu = model._lam_mu(fx.home_team.id, fx.away_team.id)
-        if lam <= 0 or mu <= 0:
+        cp = ensemble.predict_corners(fx)
+        if cp is None or cp.lambda_home <= 0 or cp.mu_away <= 0:
             continue
 
-        predicted_totals.append(lam + mu)
+        predicted_totals.append(cp.lambda_home + cp.mu_away)
         actual_totals.append(fx.home_stats.corners + fx.away_stats.corners)
 
     if len(predicted_totals) < 40:
@@ -529,17 +556,21 @@ def main(only_league: str | None = None):
             if c_cal_path.exists() and c_cal_meta.exists():
                 try:
                     meta = json.loads(c_cal_meta.read_text())
-                    if len(with_corners) - meta.get("n_corners", 0) < 50:
+                    new_corners = len(with_corners) - meta.get("n_corners", 0)
+                    if new_corners < 50 and meta.get("cal_version") == CORNERS_CAL_VERSION:
                         corners_cal = joblib.load(c_cal_path)
-                        print(f"  Corners calibrator: loaded from cache (+{len(with_corners) - meta.get('n_corners', 0)} new)")
+                        print(f"  Corners calibrator: loaded from cache (+{new_corners} new)")
                 except Exception:
                     pass
             if corners_cal is None:
-                corners_cal = build_corners_calibrator(with_corners)
+                corners_cal = build_corners_calibrator(with_corners, cfg.season)
                 if corners_cal:
                     MODELS_DIR.mkdir(parents=True, exist_ok=True)
                     joblib.dump(corners_cal, c_cal_path)
-                    c_cal_meta.write_text(json.dumps({"n_corners": len(with_corners)}))
+                    c_cal_meta.write_text(json.dumps({
+                        "n_corners": len(with_corners),
+                        "cal_version": CORNERS_CAL_VERSION,
+                    }))
                     print(f"  Corners calibrator: {corners_cal.n_samples} samples | bias {corners_cal.mean_bias:+.3f} corners")
                 else:
                     print(f"  Corners calibrator: not enough data ({len(with_corners)} enriched fixtures)")
@@ -649,6 +680,10 @@ def main(only_league: str | None = None):
 
             corners_model = corners_models.get(league_key)       # None for cups
             corners_cal   = corners_calibrators.get(league_key)  # None for cups
+
+            fe_upcoming = FeatureEngineer()
+            fe_upcoming.precompute(completed)
+
             saved_predictions: dict = {}  # fixture_id -> FixturePrediction, for tracked prob update
             for fx in upcoming:
                 pred = model.predict(fx)
@@ -697,6 +732,8 @@ def main(only_league: str | None = None):
                     lam_c, mu_c = corners_cal.transform(cp.lambda_home, cp.mu_away)
                     cp = corners_prediction_from_lam_mu(cp.fixture_id, lam_c, mu_c)
 
+                feats_for_db = fe_upcoming.build_features(fx, completed)
+
                 prev = prev_vals.get(fx.id)
                 row = FixturePrediction(
                     fixture_id=fx.id,
@@ -731,6 +768,7 @@ def main(only_league: str | None = None):
                     corners_under10_5=cp.under10_5 if cp else None,
                     corners_over11_5=cp.over11_5 if cp else None,
                     corners_under11_5=cp.under11_5 if cp else None,
+                    features_json=json.dumps(feats_for_db, default=float) if feats_for_db else None,
                 )
                 db.add(row)
                 saved_predictions[fx.id] = row
